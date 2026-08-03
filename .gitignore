@@ -1,0 +1,15 @@
+# Virtual environment created by run.bat
+.venv/
+
+# Locally cached Whisper model weights (also stored under %LOCALAPPDATA%)
+models/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Transcripts left behind by a cancelled or crashed job
+*.part
+*.partial.txt

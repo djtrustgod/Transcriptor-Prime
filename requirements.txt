@@ -1,0 +1,8 @@
+# Core runtime dependencies.
+#
+# faster-whisper brings in ctranslate2 (the inference engine), tokenizers,
+# huggingface-hub (model download), onnxruntime (Silero VAD) and av (PyAV).
+#
+# PyAV ships FFmpeg's libraries inside its wheel, which is why this app can
+# decode MP3/MP4/MKV/etc. without a separate ffmpeg install on the system.
+faster-whisper==1.2.1
