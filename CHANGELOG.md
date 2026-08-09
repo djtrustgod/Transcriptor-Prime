@@ -5,10 +5,31 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.8.0] - 2026-08-08
+
+Batch transcription: queue several files and let the app work through them.
 
 ### Added
 
+- A **file queue** replaces the single source picker. **Add files…** takes a
+  multi-selection, **Add folder…** queues everything in a directory (with an
+  **Include subfolders** option), and **Remove** / **Clear** edit the list.
+  Each row shows the file's length, format and live status.
+- Batch runs write one `<name>.txt` beside each source, auto-suffixed to
+  ` (2)` rather than overwriting. Output names are reserved as the queue is
+  planned, so two sources sharing a stem in one folder — `talk.mp3` and
+  `talk.mp4` — no longer resolve to the same transcript.
+- The Whisper model is loaded **once per queue** instead of once per file,
+  which is most of the wall-clock cost of a batch of short recordings.
+- A file that fails is logged, marked **Failed** in the list, and skipped — the
+  rest of the queue still runs. Only a fatal model-load error raises a dialog.
+- A second **overall** progress bar and a `File 2 of 7 · 34% overall` readout,
+  shown only when more than one file is queued, plus an end-of-batch summary
+  (`3 succeeded · 1 failed · 12m 04s`).
+- Double-clicking a finished row reveals that file's transcript.
+- `transcriber.transcribe_batch()` and the `FileStarted` / `FileFinished` /
+  `BatchFinished` events; `media.media_files_in()` and `media.same_file_key()`.
+- An `Include subfolders` preference (`scan_subfolders`).
 - App icon: a waveform over two lines of text, drawn at nine sizes (16–256 px) in
   `src/transcriptor_prime/assets/transcriptor-prime.ico`. Below 32 px the design simplifies so it
   stays legible in the taskbar. Regenerate with `tools/make_icon.ps1`.
@@ -20,6 +41,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   taskbar and the pinned button merges with the running window. Supports `-Uninstall` and
   `-NoDesktop`.
 - Tests for the icon file layout and the taskbar identity (`tests/test_branding.py`).
+
+### Changed
+
+- **Cancel now stops the whole queue.** The file in flight is still kept as
+  `<name>.partial.txt`; files not yet started are marked *Skipped*.
+- `Save to` is disabled while two or more files are queued, since each
+  transcript goes beside its own source. A single queued file behaves exactly
+  as before, manual Save As path included.
+- `media.unique_path()` takes a `taken=` set of names to treat as reserved.
+- `Progress` carries the queue position and overall totals, so the two progress
+  bars are driven by one event and can never disagree.
 
 ### Fixed
 

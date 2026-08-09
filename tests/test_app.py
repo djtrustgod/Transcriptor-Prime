@@ -16,6 +16,7 @@ import pytest
 tk = pytest.importorskip("tkinter")
 
 from transcriptor_prime import APP_LABEL, ICON_PATH, media  # noqa: E402
+from transcriptor_prime import app as app_mod  # noqa: E402
 from transcriptor_prime.app import (  # noqa: E402
     TranscriptorApp,
     _apply_icon,
@@ -25,7 +26,17 @@ from transcriptor_prime.app import (  # noqa: E402
     _model_label,
 )
 from transcriptor_prime.settings import LANGUAGES, MODEL_SIZES  # noqa: E402
-from transcriptor_prime.transcriber import Done, Failed, Progress, Status  # noqa: E402
+from transcriptor_prime.transcriber import (  # noqa: E402
+    COMPLETED,
+    FAILED,
+    BatchFinished,
+    Done,
+    Failed,
+    FileFinished,
+    FileStarted,
+    Progress,
+    Status,
+)
 
 
 @pytest.fixture(scope="session")
@@ -235,6 +246,264 @@ class TestEventHandling:
         assert "Detected language: en" in app.log.get("1.0", "end")
 
 
+@pytest.fixture
+def two_clips(tmp_path, tone_mp3, tone_mp4):
+    """The synthesized tones copied into one folder, so a queue has real media."""
+    first = tmp_path / "alpha.mp3"
+    second = tmp_path / "beta.mp4"
+    first.write_bytes(tone_mp3.read_bytes())
+    second.write_bytes(tone_mp4.read_bytes())
+    return [first, second]
+
+
+class TestQueue:
+    def test_adding_files_populates_the_queue_and_the_summary(self, app, two_clips):
+        app._add_paths(two_clips)
+        app._probe_pending_now()
+
+        assert len(app.items) == 2
+        assert [Path(i.path).name for i in app._queue_items()] == [
+            "alpha.mp3",
+            "beta.mp4",
+        ]
+        assert "2 files" in app.var_source_info.get()
+        assert "6s" in app.var_source_info.get()  # two 3-second tones
+
+    def test_duplicate_files_are_not_added_twice(self, app, two_clips):
+        app._add_paths(two_clips)
+        app._add_paths(two_clips)
+        assert len(app.items) == 2
+
+    def test_a_path_differing_only_in_case_is_a_duplicate_on_windows(
+        self, app, two_clips
+    ):
+        app._add_paths([two_clips[0]])
+        app._add_paths([Path(str(two_clips[0]).upper())])
+        expected = 1 if sys.platform == "win32" else 2
+        assert len(app.items) == expected
+
+    def test_removing_the_selection_shrinks_the_queue(self, app, two_clips):
+        app._add_paths(two_clips)
+        first = app.tree.get_children()[0]
+        app.tree.selection_set(first)
+
+        app._on_remove()
+
+        assert len(app.items) == 1
+        assert app._queue_items()[0].path.name == "beta.mp4"
+
+    def test_clear_empties_the_queue(self, app, two_clips):
+        app._add_paths(two_clips)
+        app._on_clear()
+        assert app.items == {}
+        assert app.tree.get_children() == ()
+        assert app.var_source_info.get() == "No files selected."
+
+    def test_a_folder_add_ignores_unsupported_extensions(self, app, two_clips, tmp_path):
+        (tmp_path / "readme.txt").write_text("not media", encoding="utf-8")
+
+        app._add_paths(media.media_files_in(tmp_path))
+
+        assert sorted(i.path.name for i in app._queue_items()) == [
+            "alpha.mp3",
+            "beta.mp4",
+        ]
+
+    def test_the_queue_cannot_be_mutated_while_running(self, app, two_clips):
+        """A disabled ttk.Treeview still accepts clicks; self.running is the guard."""
+        app._add_paths(two_clips)
+        app._set_running(True)
+
+        app._on_clear()
+        app._on_remove()
+        app._on_browse()
+        app._on_add_folder()
+
+        assert len(app.items) == 2
+
+    def test_rows_appear_before_they_have_been_read(self, app, two_clips):
+        """A folder add must not block on probing; the rows land immediately."""
+        app._add_paths(two_clips)
+
+        assert len(app.tree.get_children()) == 2
+        assert all(i.info is None for i in app._queue_items())
+        assert "still being read" in app.var_source_info.get()
+
+    def test_chunked_probing_fills_the_rows_in_on_the_event_loop(
+        self, app, two_clips, monkeypatch
+    ):
+        monkeypatch.setattr(app_mod, "PROBE_CHUNK", 1)
+        app._add_paths(two_clips)
+
+        app._probe_chunk()
+        assert [i.info is not None for i in app._queue_items()] == [True, False]
+
+        app._probe_chunk()
+        assert all(i.info is not None for i in app._queue_items())
+        assert "6s" in app.var_source_info.get()
+
+    def test_clearing_mid_probe_leaves_nothing_to_probe(self, app, two_clips):
+        app._add_paths(two_clips)
+        app._on_clear()
+
+        app._probe_chunk()  # must not raise or resurrect anything
+
+        assert app.items == {}
+
+
+class TestQueueOutputPaths:
+    def test_two_queued_files_disable_the_save_to_box(self, app, two_clips):
+        app._add_paths(two_clips)
+
+        assert str(app.entry_output["state"]) == "disabled"
+        assert str(app.btn_saveas["state"]) == "disabled"
+        assert app.var_output.get() == app_mod.BATCH_OUTPUT_HINT
+
+    def test_a_single_queued_file_keeps_the_save_to_box_editable(self, app, two_clips):
+        app._set_source(two_clips[0])
+
+        assert str(app.entry_output["state"]) == "normal"
+        assert Path(app.var_output.get()) == two_clips[0].with_suffix(".txt")
+
+    def test_dropping_back_to_one_file_restores_the_manual_save_path(
+        self, app, two_clips
+    ):
+        app._set_source(two_clips[0])
+        app.output_is_manual = True
+        app.var_output.set(r"D:\elsewhere\mine.txt")
+
+        app._add_paths([two_clips[1]])
+        assert app.var_output.get() == app_mod.BATCH_OUTPUT_HINT
+
+        app.tree.selection_set(app.tree.get_children()[1])
+        app._on_remove()
+
+        assert app.var_output.get() == r"D:\elsewhere\mine.txt"
+        assert str(app.entry_output["state"]) == "normal"
+
+    def test_output_paths_are_unique_within_a_batch(self, app, tmp_path, tone_mp3, tone_mp4):
+        """talk.mp3 and talk.mp4 both want talk.txt, and neither exists yet."""
+        for name, source in (("talk.mp3", tone_mp3), ("talk.mp4", tone_mp4)):
+            (tmp_path / name).write_bytes(source.read_bytes())
+        app._add_paths([tmp_path / "talk.mp3", tmp_path / "talk.mp4"])
+        app._probe_pending_now()
+
+        jobs = app._build_jobs()
+
+        assert [j.output.name for j in jobs] == ["talk.txt", "talk (2).txt"]
+
+    def test_unreadable_files_are_dropped_from_the_batch(self, app, two_clips, tmp_path):
+        broken = tmp_path / "broken.mp3"
+        broken.write_text("not audio", encoding="utf-8")
+        app._add_paths(two_clips + [broken])
+        app._probe_pending_now()
+
+        jobs = app._build_jobs()
+
+        assert [j.source.name for j in jobs] == ["alpha.mp3", "beta.mp4"]
+        assert "1 unreadable" in app.var_source_info.get()
+
+
+class TestBatchEventHandling:
+    @pytest.fixture
+    def running_app(self, app, two_clips):
+        app._add_paths(two_clips)
+        app._probe_pending_now()
+        app._run_iids = list(app.tree.get_children())
+        app._set_running(True)
+        return app
+
+    def test_file_started_marks_the_row_running(self, running_app, two_clips):
+        running_app._handle(
+            FileStarted(index=0, count=2, source=two_clips[0],
+                        output=two_clips[0].with_suffix(".txt"), duration=3.0)
+        )
+        assert running_app._queue_items()[0].status == "running"
+        assert "Transcribing" in running_app.tree.set(
+            running_app._run_iids[0], "status"
+        )
+
+    def test_file_finished_marks_the_row_and_logs_the_output(
+        self, running_app, two_clips
+    ):
+        output = two_clips[0].with_suffix(".txt")
+        running_app._handle(
+            FileFinished(index=0, source=two_clips[0], output=output,
+                         elapsed=2.0, status=COMPLETED)
+        )
+        assert running_app._queue_items()[0].status == "done"
+        assert running_app.batch_outputs == [output]
+        assert str(output) in running_app.log.get("1.0", "end")
+
+    def test_a_failed_file_is_logged_without_a_dialog(self, running_app, two_clips, monkeypatch):
+        dialogs = []
+        monkeypatch.setattr(
+            "transcriptor_prime.app.messagebox.showerror",
+            lambda *a, **k: dialogs.append(a),
+        )
+        running_app._handle(
+            FileFinished(index=1, source=two_clips[1], output=None, elapsed=1.0,
+                         status=FAILED, message="decoder blew up")
+        )
+        assert running_app._queue_items()[1].status == "failed"
+        assert "decoder blew up" in running_app.log.get("1.0", "end")
+        assert dialogs == []
+
+    def test_batch_finished_summarises_and_re_enables_the_form(
+        self, running_app, two_clips
+    ):
+        output = two_clips[0].with_suffix(".txt")
+        output.write_text("x", encoding="utf-8")
+
+        running_app._handle(
+            BatchFinished(completed=1, failed=1, cancelled=0, skipped=0,
+                          elapsed=42.0, outputs=(output,))
+        )
+
+        status = running_app.var_status.get()
+        assert "1 succeeded" in status and "1 failed" in status
+        assert str(running_app.btn_start["state"]) == "normal"
+        assert str(running_app.btn_open["state"]) == "normal"
+        assert running_app.last_output == output
+
+    def test_batch_finished_marks_unstarted_rows_skipped(self, running_app):
+        running_app._handle(
+            BatchFinished(completed=0, failed=0, cancelled=0, skipped=2, elapsed=1.0)
+        )
+        assert [i.status for i in running_app._queue_items()] == ["skipped", "skipped"]
+
+    def test_a_fatal_batch_message_shows_exactly_one_dialog(
+        self, running_app, monkeypatch
+    ):
+        dialogs = []
+        monkeypatch.setattr(
+            "transcriptor_prime.app.messagebox.showerror",
+            lambda *a, **k: dialogs.append(a),
+        )
+        running_app._handle(
+            BatchFinished(completed=0, failed=0, cancelled=0, skipped=2,
+                          elapsed=1.0, message="no internet connection")
+        )
+        assert len(dialogs) == 1
+
+    def test_batch_progress_drives_the_overall_bar(self, app):
+        app._handle(
+            Progress(audio_done=50.0, audio_total=100.0, elapsed=10.0, eta=10.0,
+                     file_index=1, file_count=4, batch_done=150.0, batch_total=400.0)
+        )
+        assert app.var_batch_progress.get() == pytest.approx(37.5)
+        assert app.var_progress.get() == pytest.approx(50.0)
+        assert "File 2 of 4" in app.var_batch_percent.get()
+
+    def test_the_overall_bar_is_hidden_for_a_single_file(self, app, two_clips):
+        app._set_source(two_clips[0])
+        assert not app.progress_batch.winfo_ismapped()
+
+        app._add_paths([two_clips[1]])
+        app.root.update_idletasks()
+        assert app.progress_batch.winfo_manager() == "grid"
+
+
 class TestSettingsCapture:
     def test_widget_values_are_captured_and_clamped(self, app):
         app.var_model.set(_model_label("medium"))
@@ -250,13 +519,13 @@ class TestSettingsCapture:
         assert app.settings.wrap_width == 300  # clamped
 
 
-def test_start_without_a_source_warns_instead_of_crashing(app, monkeypatch):
+def test_start_with_an_empty_queue_warns_instead_of_crashing(app, monkeypatch):
     warned = []
     monkeypatch.setattr(
         "transcriptor_prime.app.messagebox.showwarning",
         lambda *a, **k: warned.append(a),
     )
-    app.var_source.set("")
+    app._on_clear()
 
     app._on_start()
 

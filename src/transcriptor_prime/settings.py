@@ -75,6 +75,7 @@ class Settings:
     wrap_width: int = 100
     cpu_threads: int = 0  # 0 means "use default_cpu_threads()"
     condition_on_previous_text: bool = True
+    scan_subfolders: bool = False  # whether "Add folder…" recurses
     last_input_dir: str = ""
     last_output_dir: str = ""
 
@@ -90,6 +91,8 @@ class Settings:
         self.interval_seconds = max(5, min(600, int(self.interval_seconds)))
         self.wrap_width = max(0, min(300, int(self.wrap_width)))
         self.cpu_threads = max(0, min(64, int(self.cpu_threads)))
+        self.condition_on_previous_text = bool(self.condition_on_previous_text)
+        self.scan_subfolders = bool(self.scan_subfolders)
         return self
 
 

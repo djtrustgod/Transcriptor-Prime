@@ -9,8 +9,10 @@ immediately on selection, rather than 30 seconds into a job.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Container, Iterable
 
 # Extensions offered in the file dialog. Anything FFmpeg can demux will work;
 # this is just the shortlist that covers the expected inputs.
@@ -118,19 +120,59 @@ def default_output_path(source: str | Path) -> Path:
     return source.with_suffix(".txt")
 
 
-def unique_path(path: str | Path) -> Path:
+def unique_path(path: str | Path, taken: Container[Path] = frozenset()) -> Path:
     """Return ``path``, or ``name (2).txt`` etc. if it is already taken.
 
     Avoids silently overwriting an existing transcript when the user transcribes
     the same source twice.
+
+    ``taken`` reserves names that are not on disk *yet*. A batch plans every
+    output path before a single transcript exists, so two queued sources that
+    share a stem in one folder — ``talk.mp3`` and ``talk.mp4`` — would both
+    resolve to ``talk.txt`` and the second run would clobber the first.
     """
     path = Path(path)
-    if not path.exists():
+    if not path.exists() and path not in taken:
         return path
     stem, suffix, parent = path.stem, path.suffix, path.parent
     counter = 2
     while True:
         candidate = parent / f"{stem} ({counter}){suffix}"
-        if not candidate.exists():
+        if not candidate.exists() and candidate not in taken:
             return candidate
         counter += 1
+
+
+def media_files_in(directory: str | Path, recursive: bool = False) -> list[Path]:
+    """Every file under ``directory`` with a supported extension, sorted.
+
+    Used by the queue's "Add folder…" button. Sorting is case-insensitive so
+    the queue order matches what the file manager shows.
+    """
+    directory = Path(directory)
+    walker: Iterable[Path] = (
+        directory.rglob("*") if recursive else directory.iterdir()
+    )
+    try:
+        found = [
+            entry
+            for entry in walker
+            if entry.suffix.lower() in SUPPORTED_EXTENSIONS and entry.is_file()
+        ]
+    except OSError:
+        return []
+    return sorted(found, key=lambda p: str(p).lower())
+
+
+def same_file_key(path: str | Path) -> str:
+    """A comparison key for "is this already in the queue?".
+
+    ``Path.resolve()`` alone is not enough on Windows: it does not case-fold,
+    so ``C:\\Rec\\A.MP3`` and ``c:\\rec\\a.mp3`` would queue twice.
+    """
+    path = Path(path)
+    try:
+        resolved = path.resolve()
+    except OSError:  # pragma: no cover - a path the OS refuses to resolve
+        resolved = path
+    return os.path.normcase(str(resolved))

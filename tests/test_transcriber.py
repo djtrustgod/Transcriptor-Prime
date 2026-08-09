@@ -10,12 +10,25 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass
+from inspect import signature
 from pathlib import Path
 
 import pytest
 
 from transcriptor_prime import transcriber
-from transcriptor_prime.transcriber import Done, Failed, Job, Progress, Status
+from transcriptor_prime.transcriber import (
+    CANCELLED,
+    COMPLETED,
+    FAILED,
+    BatchFinished,
+    Done,
+    Failed,
+    FileFinished,
+    FileStarted,
+    Job,
+    Progress,
+    Status,
+)
 
 
 @dataclass
@@ -35,35 +48,56 @@ class FakeInfo:
 class FakeModel:
     """Yields canned segments, optionally pausing so a cancel can land."""
 
-    def __init__(self, segments, duration, on_segment=None, **kwargs):
+    def __init__(self, segments, duration, on_segment=None, fail_for=(), **kwargs):
         self.segments = segments
         self.duration = duration
         self.on_segment = on_segment
+        self.fail_for = set(fail_for)
         self.kwargs = kwargs
         self.transcribe_kwargs: dict = {}
+        self.sources: list[str] = []
 
     def transcribe(self, path, **kwargs):
         self.transcribe_kwargs = kwargs
+        self.sources.append(Path(path).name)
+        name = Path(path).name
+        duration = self.duration
+        if callable(duration):
+            duration = duration(name)
 
         def generate():
             for index, segment in enumerate(self.segments):
+                if name in self.fail_for:
+                    raise RuntimeError(f"decoder blew up on {name}")
                 if self.on_segment:
-                    self.on_segment(index)
+                    self.on_segment(index, name)
                 yield segment
 
-        return generate(), FakeInfo(duration=self.duration)
+        return generate(), FakeInfo(duration=duration)
 
 
 @pytest.fixture
 def install_model(monkeypatch):
-    """Patch ``faster_whisper.WhisperModel`` and hand back the constructed stub."""
+    """Patch ``faster_whisper.WhisperModel`` and hand back the constructed stub.
+
+    ``holder["calls"]`` counts constructions, which is how the batch tests pin
+    "the model is loaded once for the whole queue".
+    """
     import faster_whisper
 
-    holder: dict = {}
+    holder: dict = {"calls": 0}
 
-    def install(segments, duration, on_segment=None):
+    def install(segments, duration, on_segment=None, fail_for=()):
+        # FakeModel calls the hook as (index, name). The single-file tests'
+        # hooks take only an index, so adapt on arity rather than churn every
+        # existing caller.
+        hook = on_segment
+        if on_segment is not None and len(signature(on_segment).parameters) == 1:
+            hook = lambda index, name: on_segment(index)  # noqa: E731
+
         def factory(*args, **kwargs):
-            model = FakeModel(segments, duration, on_segment, **kwargs)
+            model = FakeModel(segments, duration, hook, fail_for, **kwargs)
+            holder["calls"] += 1
             holder["model"] = model
             holder["init_args"] = (args, kwargs)
             return model
@@ -289,6 +323,235 @@ class TestFailures:
         )
         assert "Detected language: en" in messages
         assert "Transcribing" in messages
+
+
+def make_jobs(tmp_path: Path, names, **overrides) -> list[Job]:
+    """One job per name, each with its own source and output beside it."""
+    jobs = []
+    for name in names:
+        source = tmp_path / name
+        source.write_bytes(b"not really audio, the model is stubbed")
+        jobs.append(
+            make_job(
+                tmp_path,
+                source=source,
+                output=source.with_suffix(".txt"),
+                **overrides,
+            )
+        )
+    return jobs
+
+
+def run_batch(jobs, cancel: threading.Event | None = None) -> list:
+    events: list = []
+    transcriber.transcribe_batch(jobs, events.append, cancel or threading.Event())
+    return events
+
+
+def only(events, kind):
+    return [e for e in events if isinstance(e, kind)]
+
+
+class TestBatch:
+    def test_the_model_is_loaded_once_for_the_whole_batch(
+        self, tmp_path, install_model
+    ):
+        """The point of the batch path: a WhisperModel costs seconds to build."""
+        holder = install_model(SEGMENTS, duration=95.0)
+        jobs = make_jobs(tmp_path, ["a.mp3", "b.mp3", "c.mp3"])
+
+        run_batch(jobs)
+
+        assert holder["calls"] == 1
+        assert all(job.output.exists() for job in jobs)
+
+    def test_every_file_gets_a_started_and_a_finished_event(
+        self, tmp_path, install_model
+    ):
+        install_model(SEGMENTS, duration=95.0)
+        jobs = make_jobs(tmp_path, ["a.mp3", "b.mp3", "c.mp3"])
+
+        events = run_batch(jobs)
+
+        assert [e.index for e in only(events, FileStarted)] == [0, 1, 2]
+        finished = only(events, FileFinished)
+        assert [e.index for e in finished] == [0, 1, 2]
+        assert all(e.status == COMPLETED for e in finished)
+        assert [e.source.name for e in finished] == ["a.mp3", "b.mp3", "c.mp3"]
+
+    def test_the_batch_summary_counts_every_file(self, tmp_path, install_model):
+        install_model(SEGMENTS, duration=95.0)
+        jobs = make_jobs(tmp_path, ["a.mp3", "b.mp3"])
+
+        summary = only(run_batch(jobs), BatchFinished)
+
+        assert len(summary) == 1
+        assert (summary[0].completed, summary[0].failed) == (2, 0)
+        assert summary[0].skipped == 0
+        assert summary[0].outputs == tuple(job.output for job in jobs)
+
+    def test_a_failing_file_does_not_stop_the_batch(self, tmp_path, install_model):
+        install_model(SEGMENTS, duration=95.0, fail_for={"b.mp3"})
+        jobs = make_jobs(tmp_path, ["a.mp3", "b.mp3", "c.mp3"])
+
+        events = run_batch(jobs)
+
+        finished = only(events, FileFinished)
+        assert [e.status for e in finished] == [COMPLETED, FAILED, COMPLETED]
+        assert "decoder blew up" in finished[1].message
+        assert finished[1].output is None
+
+        summary = only(events, BatchFinished)[0]
+        assert (summary.completed, summary.failed) == (2, 1)
+        assert jobs[0].output.exists() and jobs[2].output.exists()
+        assert not jobs[1].output.exists()
+        assert list(tmp_path.glob("*.part")) == []
+
+    def test_a_failing_file_raises_no_failed_event(self, tmp_path, install_model):
+        """`Failed` would unlock the GUI form while the worker is still running."""
+        install_model(SEGMENTS, duration=95.0, fail_for={"a.mp3"})
+
+        events = run_batch(make_jobs(tmp_path, ["a.mp3", "b.mp3"]))
+
+        assert only(events, Failed) == []
+        assert only(events, Done) == []
+
+    def test_cancel_mid_batch_skips_the_rest(self, tmp_path, install_model):
+        cancel = threading.Event()
+        install_model(
+            SEGMENTS,
+            duration=95.0,
+            on_segment=lambda i, name: (
+                cancel.set() if name == "b.mp3" and i == 2 else None
+            ),
+        )
+        jobs = make_jobs(tmp_path, ["a.mp3", "b.mp3", "c.mp3"])
+
+        events = run_batch(jobs, cancel)
+
+        finished = only(events, FileFinished)
+        assert [e.status for e in finished] == [COMPLETED, CANCELLED]
+        # The third file must never even start.
+        assert [e.index for e in only(events, FileStarted)] == [0, 1]
+
+        summary = only(events, BatchFinished)[0]
+        assert (summary.completed, summary.cancelled, summary.skipped) == (1, 1, 1)
+        assert jobs[0].output.exists()
+        assert (tmp_path / "b.partial.txt").exists()
+        assert not jobs[2].output.exists()
+
+    def test_cancel_before_the_batch_starts_runs_nothing(
+        self, tmp_path, install_model
+    ):
+        cancel = threading.Event()
+        cancel.set()
+        install_model(SEGMENTS, duration=95.0)
+        jobs = make_jobs(tmp_path, ["a.mp3", "b.mp3"])
+
+        events = run_batch(jobs, cancel)
+
+        assert only(events, FileStarted) == []
+        assert only(events, BatchFinished)[0].skipped == 2
+        assert not any(job.output.exists() for job in jobs)
+
+    def test_a_model_load_failure_reports_one_fatal_summary(
+        self, tmp_path, monkeypatch
+    ):
+        import faster_whisper
+
+        def explode(*args, **kwargs):
+            raise OSError("Failed to resolve 'huggingface.co'")
+
+        monkeypatch.setattr(faster_whisper, "WhisperModel", explode)
+        jobs = make_jobs(tmp_path, ["a.mp3", "b.mp3"])
+
+        events = run_batch(jobs)
+
+        assert only(events, FileStarted) == []
+        assert only(events, Failed) == []  # rides on BatchFinished.message instead
+        summary = only(events, BatchFinished)[0]
+        assert summary.skipped == 2
+        assert "internet connection" in summary.message
+
+    def test_an_empty_batch_finishes_immediately(self, tmp_path, install_model):
+        install_model(SEGMENTS, duration=95.0)
+        events = run_batch([])
+        assert len(only(events, BatchFinished)) == 1
+        assert only(events, BatchFinished)[0].skipped == 0
+
+    def test_a_batch_of_one_writes_what_transcribe_writes(
+        self, tmp_path, install_model
+    ):
+        install_model(SEGMENTS, duration=95.0)
+        job = make_jobs(tmp_path, ["solo.mp3"])[0]
+
+        run_batch([job])
+
+        assert "Transcript: solo.mp3" in job.output.read_text(encoding="utf-8")
+
+
+class TestBatchProgress:
+    def test_batch_fraction_spans_every_file(self, tmp_path, install_model, monkeypatch):
+        """Two files of 100s and 300s: finishing the first is 25% overall."""
+        monkeypatch.setattr(transcriber, "_UPDATE_INTERVAL", 0.0)
+        install_model(SEGMENTS, duration=lambda name: 100.0 if name == "a.mp3" else 300.0)
+        jobs = [
+            make_jobs(tmp_path, ["a.mp3"], duration=100.0)[0],
+            make_jobs(tmp_path, ["b.mp3"], duration=300.0)[0],
+        ]
+
+        progress = only(run_batch(jobs), Progress)
+
+        assert progress[0].batch_total == pytest.approx(400.0)
+        # The last event of file 0 is emitted with audio_done == its total.
+        first_file_end = [p for p in progress if p.file_index == 0][-1]
+        assert first_file_end.batch_fraction == pytest.approx(0.25)
+        assert progress[-1].batch_fraction == pytest.approx(1.0)
+
+        fractions = [p.batch_fraction for p in progress]
+        assert fractions == sorted(fractions)
+
+    def test_overshoot_is_clamped_when_whisper_disagrees_with_the_probe(
+        self, tmp_path, install_model, monkeypatch
+    ):
+        """PyAV and Whisper disagree on VBR MP3; the overall bar must not creep."""
+        monkeypatch.setattr(transcriber, "_UPDATE_INTERVAL", 0.0)
+        # Whisper reports 200s of audio for a file the probe measured at 100s.
+        install_model(SEGMENTS, duration=200.0)
+        jobs = [
+            make_jobs(tmp_path, ["a.mp3"], duration=100.0)[0],
+            make_jobs(tmp_path, ["b.mp3"], duration=100.0)[0],
+        ]
+
+        progress = only(run_batch(jobs), Progress)
+
+        assert all(p.batch_fraction <= 1.0 for p in progress)
+        assert [p for p in progress if p.file_index == 0][-1].batch_done == (
+            pytest.approx(100.0)
+        )
+
+    def test_unknown_durations_fall_back_to_counting_files(
+        self, tmp_path, install_model
+    ):
+        install_model(SEGMENTS, duration=95.0)
+        jobs = make_jobs(tmp_path, ["a.mp3", "b.mp3"], duration=0.0)
+
+        progress = only(run_batch(jobs), Progress)
+
+        assert progress[0].batch_total == 0.0
+        assert progress[-1].batch_fraction == pytest.approx(1.0)
+        assert [p.batch_fraction for p in progress] == sorted(
+            p.batch_fraction for p in progress
+        )
+
+    def test_a_single_file_run_carries_no_batch_context(self, tmp_path, install_model):
+        """`transcribe()` must keep emitting exactly what it always has."""
+        install_model(SEGMENTS, duration=95.0)
+
+        progress = [e for e in run(make_job(tmp_path)) if isinstance(e, Progress)]
+
+        assert all(p.file_count == 1 and p.batch_total == 0.0 for p in progress)
+        assert progress[-1].batch_fraction == pytest.approx(1.0)
 
 
 @pytest.mark.slow
