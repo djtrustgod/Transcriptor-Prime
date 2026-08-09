@@ -6,10 +6,10 @@
 src/transcriptor_prime/
   __init__.py    version, app name, taskbar identity, asset paths
   __main__.py    entry point; turns a startup crash into a dialog
-  app.py         Tk window, widgets, event pump          (the only Tk code)
+  app.py         Tk window, file queue, event pump       (the only Tk code)
   transcriber.py worker thread wrapping faster-whisper   (no Tk imports)
   formatting.py  timecodes and paragraph grouping        (pure functions)
-  media.py       PyAV probe for duration and streams
+  media.py       PyAV probe, folder scan, output naming
   settings.py    JSON preferences + app data locations
   assets/        transcriptor-prime.ico, logo.png
 tools/
@@ -47,21 +47,27 @@ Tk is not thread-safe, so the rule is absolute: **only the main thread touches a
 main thread                          worker thread
 -----------                          -------------
 _on_start()
-  builds a Job
-  threading.Thread(transcribe) ───>  transcribe(job, emit, cancel)
-                                       emit(Status(...))  ─┐
-  root.after(100, _poll)               emit(Progress(...)) ├─> queue.Queue
-  _poll() drains the queue  <──────────emit(Done(...))    ─┘
-    _handle(event) updates widgets
+  plans one Job per queued file
+  Thread(transcribe_batch) ──────>   transcribe_batch(jobs, emit, cancel)
+                                       _build_model()      — once per queue
+                                       per file:
+                                         emit(FileStarted)     ─┐
+  root.after(100, _poll)                  emit(Status/Progress) │
+  _poll() drains the queue  <────────     emit(FileFinished)    ├─> queue.Queue
+    _handle(event) updates widgets     emit(BatchFinished)     ─┘
 ```
 
-`emit` is just `queue.Queue.put`. The worker's four event types — `Status`, `Progress`, `Done`,
-`Failed` — are frozen dataclasses, so nothing mutable crosses the boundary. `_poll` reschedules
-itself every 100 ms for the life of the window.
+`emit` is just `queue.Queue.put`. Every event type — `Status`, `Progress`, `Done`, `Failed`,
+`FileStarted`, `FileFinished`, `BatchFinished` — is a frozen dataclass, and the GUI hands the worker
+a `tuple` of frozen `Job`s, so nothing mutable crosses the boundary in either direction. `_poll`
+reschedules itself every 100 ms for the life of the window.
 
 Progress events are throttled to one every 0.5 s. Whisper emits a segment every few seconds of
 *audio*, which on a fast model is many per second of wall clock; unthrottled it would flood the
 queue and thrash the disk.
+
+**There is exactly one background thread.** Reading a queued file's duration would be the obvious
+second one, but see "Probing on the event loop" below — it is not, deliberately.
 
 ### Cancellation
 
@@ -73,7 +79,73 @@ cancellation is honoured at a checkpoint right after the load instead. The butto
 "Cancelling…" to make the wait legible. This phase lasts seconds against a run that may last hours,
 so a hard kill is not worth the complexity of a subprocess.
 
+Cancel abandons the **whole queue**, not just the current file: one button, one meaning. The file in
+flight still lands as `<name>.partial.txt`; the rest are counted in `BatchFinished.skipped` and never
+get a `FileStarted`. A "skip just this one" affordance would need a second button and has no obvious
+use for a queue you walked away from.
+
 The worker is a daemon thread, so it cannot keep a closed app alive.
+
+## Batches
+
+`transcribe_batch()` is the GUI's only entry point — a single file is a queue of one, so there is no
+second code path to keep in step. Three decisions shape it.
+
+**The model is loaded once.** `_build_model()` was split out of the old `_load_model` precisely so a
+queue could hoist it: constructing a `WhisperModel` costs seconds and hundreds of megabytes, and
+paying that per file would dominate a batch of short clips. `_run_one()` takes an already-loaded
+model and is what both entry points share.
+
+**One bad file does not end the run.** `_run_one` never raises; it returns a `_Result` carrying
+`COMPLETED` / `CANCELLED` / `FAILED` and, on failure, the text from `_friendly_error()`. The loop
+reports it as `FileFinished` and moves on.
+
+**`transcribe_batch` never emits `Done` or `Failed`.** Both of those unlock the GUI's form, so
+either one mid-queue would re-enable Start while the worker was still running. The terminal event is
+always `BatchFinished`, on every path including an empty queue and a fatal model load — the latter
+rides on `BatchFinished.message`, which is the only thing in a batch that raises a dialog.
+
+### Progress across a queue
+
+`Progress` carries the queue position and totals alongside the per-file numbers rather than there
+being a separate `BatchProgress` event. The two progress bars are two views of one instant; one
+event means one throttle and no way for them to disagree. Every batch field is defaulted, so a
+single-file run constructs a `Progress` exactly as it always did.
+
+Two details the naive version gets wrong:
+
+- **The denominator is summed *probe* durations, but `audio_done` counts what Whisper decoded**, and
+  the two disagree by a second or two on VBR MP3. The in-flight file's contribution is clamped with
+  `min(audio_done, job.duration)` or the overall bar creeps past 100% on a long queue.
+- **The batch ETA is timed from after the model load.** A first-time weight download is minutes;
+  folding it into the throughput estimate would poison the ETA for the next two hours.
+
+If any queued file has an unknown duration the summed denominator would be a lie, so `batch_total`
+is set to `0.0` and `batch_fraction` falls back to counting files. A coarse bar beats a wrong one.
+
+### Naming outputs before they exist
+
+`media.unique_path()` grew a `taken=` set. A batch plans every output path up front, when no
+transcript exists yet to collide with — so `talk.mp3` and `talk.mp4` in one folder would both
+resolve to `talk.txt` and the second run would silently clobber the first. `_build_jobs()`
+accumulates the reservation as it goes. Same stem in *different* folders was never a problem: the
+`.part` file lives beside its own output.
+
+### Probing on the event loop
+
+`media.probe()` opens the container, which is 5-20 ms for a local file and can be a second on a
+network share. Doing 200 of them inline when someone adds a folder is a visibly frozen window.
+
+The obvious fix is a background thread, and that is what this originally was — until the test suite
+started reporting `RuntimeError: main thread is not in main loop` from `Variable.__del__`. Any thread
+that allocates can trigger the GC pass that finalises an orphaned Tk object, and the finaliser calls
+into Tcl. The thread never touched a widget and still broke the one rule this app has.
+
+So `_schedule_probe()` walks the queue `PROBE_CHUNK` files per `after(1, …)` tick instead. Rows
+appear immediately with a `reading…` placeholder and fill in over the next few frames, the event loop
+repaints between chunks, and every Tcl call stays on the main thread. `_probe_pending_now()` resolves
+whatever is left synchronously — `_on_start` calls it so no `Job` ever goes out with an unknown
+duration, and the GUI tests use it instead of pumping the event loop.
 
 ## Durability: `.part` files and atomic rename
 
@@ -84,7 +156,8 @@ failure, so output is never held in memory:
 2. As each paragraph closes, append it and flush periodically.
 3. On success, `os.replace()` the `.part` onto `<output>.txt` — atomic on the same volume, so the
    real path either does not exist or is complete. There is no window in which a reader sees a
-   half-written transcript.
+   half-written transcript. In a batch each file gets its own `.part` beside its own output, so a
+   crash at file seven leaves the first six complete and the seventh recoverable.
 4. On cancel, rename to `<output>.partial.txt` instead — the distinct name makes it obvious the
    text is incomplete.
 5. On an exception, delete the `.part` and report a `Failed` event. (A crash of the whole process
@@ -105,7 +178,8 @@ because Whisper's segments are the smallest unit with a reliable timestamp.
 ## Failure handling
 
 `media.probe()` runs on file selection, so a corrupt file or a video with no audio track fails in
-the dialog rather than 30 seconds into a job.
+the dialog rather than 30 seconds into a job. In a queue it marks that row *Unreadable* and the file
+is dropped from the run — one dialog per bad file would be unusable on a folder add.
 
 `transcriber._friendly_error()` translates the failures users actually hit — no network on first
 download, a transcript open in another program, a full disk — into plain sentences. Everything else
@@ -155,15 +229,29 @@ enforces this.
 `pytest` runs the whole suite in a couple of seconds.
 
 - `test_formatting.py` — timecodes and grouping, pure functions, no I/O.
-- `test_media.py` — probes real MP3 and MP4 files that `conftest.py` synthesizes with PyAV.
+- `test_media.py` — probes real MP3 and MP4 files that `conftest.py` synthesizes with PyAV, plus the
+  folder scan and the output-name reservation.
 - `test_settings.py` — round-trip, corruption, clamping, unknown keys from a future version.
 - `test_transcriber.py` — a `FakeModel` stands in for `WhisperModel`, so incremental writing,
   atomic rename, cancellation, progress monotonicity and error mapping are all verified without
-  downloading weights. One test at the bottom, marked `slow`, does a genuine run with `tiny`.
+  downloading weights. `TestBatch` pins the batch contract: the model is constructed exactly once
+  for a three-job queue, a failing file leaves the others untouched, a cancel skips the remainder,
+  and neither a bad file nor a fatal load emits `Done`/`Failed`. One test at the bottom, marked
+  `slow`, does a genuine run with `tiny`.
 - `test_app.py` — builds the real Tk window and drives the handlers directly; skips where no
   display exists. The Tk interpreter is session-scoped, with each test on its own `Toplevel`: a
   fresh `tk.Tk()` per test failed intermittently, and the fixture's display check would have
-  reported any such failure as a skip rather than a failure.
+  reported any such failure as a skip rather than a failure. `TestQueue` covers add/remove/clear,
+  deduplication and the running-guard; `TestQueueOutputPaths` covers the single-file back-compat
+  surface that is most likely to rot.
+
+Two Tk behaviours were measured rather than assumed, and both shaped the code:
+
+- **`ttk.Treeview` has no `-state` option.** `tree.config(state="disabled")` raises `TclError`, so
+  it cannot go in `_set_running`'s widget loop; `tree.state(["disabled"])` is used instead.
+- **A "disabled" Treeview still accepts clicks.** `state(["disabled"])` only greys the rows. The
+  `self.running` flag, checked at the top of every queue handler, is what actually protects the
+  queue during a run — there is a test that pins exactly this.
 - `test_branding.py` — parses the committed `.ico` and asserts the size set, the BMP/PNG split,
   the file size ceiling, and that the taskbar identity round-trips through the Windows shell API.
 

@@ -1,14 +1,14 @@
 <img src="src/transcriptor_prime/assets/logo.png" alt="" width="88" align="right">
 
-# Transcriptor Prime 0.5.0
+# Transcriptor Prime 0.8.0
 
-A desktop app that turns an audio or video recording into a plain-text transcript with periodic
+A desktop app that turns audio or video recordings into plain-text transcripts with periodic
 timecodes. Everything runs **locally** — no cloud service, no API key, and nothing about your
 recordings leaves the machine.
 
 Built for long recordings: a three-hour interview transcribes with a live progress bar and ETA, can
 be cancelled at any point, and writes text to disk as it goes so a crash never costs you the whole
-run.
+run. Queue a folder of them and leave it running.
 
 ## Quick start
 
@@ -19,8 +19,10 @@ The first launch sets up a private Python environment and downloads the dependen
 
 Then:
 
-1. **Browse…** and pick your MP3 or MP4. The duration and format appear underneath.
-2. Check the **Save to** path — it defaults to a `.txt` beside the source file.
+1. **Add files…** and pick one or more recordings — or **Add folder…** to queue everything in a
+   folder at once. Each file's length and format appear in the list.
+2. Check the **Save to** path — it defaults to a `.txt` beside the source file. With more than one
+   file queued it is disabled: every transcript is written beside its own source.
 3. Pick a **Model** (see the table below) and press **Start**.
 
 The first transcription with a given model downloads that model's weights (~250 MB for `small`).
@@ -88,7 +90,7 @@ Duration:   00:00:31
 Model:      small (int8, CPU)
 Language:   en (detected, 0.99)
 Generated:  2026-08-02 15:28
-Created by: Transcriptor Prime 0.5.0
+Created by: Transcriptor Prime 0.8.0
 
 ------------------------------------------------------------
 
@@ -112,10 +114,39 @@ Set **Wrap at** to `0` if you would rather each paragraph stayed on one long lin
 - The progress bar reflects real position in the audio, and the ETA sharpens after the first
   minute or so.
 - **Cancel** stops the run and keeps everything transcribed so far as
-  `<name>.partial.txt`.
+  `<name>.partial.txt`. With a queue, it also skips the files that have not started.
 - While a job runs, completed paragraphs are already being written to `<name>.txt.part`. If the app
   or the machine dies, that file holds the work up to that moment — rename it to `.txt` to keep it.
 - Closing the window mid-job asks first.
+
+## Transcribing several files
+
+The list at the top of the window is a queue. Build it however suits you:
+
+| Button | What it does |
+|---|---|
+| **Add files…** | Pick one file or several — the dialog allows a multi-selection. |
+| **Add folder…** | Queue every supported recording in a folder. Tick **Include subfolders** first to walk it recursively. |
+| **Remove** | Drop the selected rows. Also on the <kbd>Delete</kbd> key. |
+| **Clear** | Empty the queue. |
+
+Press **Start** and the app works through the list in order, top to bottom. Things worth knowing:
+
+- **Each transcript is written beside its own source** as `<name>.txt`. Nothing is overwritten: an
+  existing transcript pushes the new one to `<name> (2).txt`. That also covers the case where
+  `talk.mp3` and `talk.mp4` sit in the same folder and both want `talk.txt`.
+- **The model loads once for the whole queue**, not once per file. On a batch of short clips that is
+  most of the total time saved.
+- **A file that cannot be read does not stop the run.** It is logged, its row turns *Failed*, and
+  the queue moves on. There is no dialog to dismiss — check the log when it finishes.
+- **Two progress bars.** The top one is the file being transcribed; the second, which appears only
+  when there is more than one file, is the queue as a whole.
+- **Cancel stops everything.** The file in flight is kept as `<name>.partial.txt`; the rest are
+  marked *Skipped*.
+- When it finishes you get a one-line summary — `3 succeeded · 1 failed · 12m 04s`. **Show
+  transcript** opens the output folder, and double-clicking any finished row reveals that file.
+
+A single queued file behaves exactly as it always has, **Save to** box and all.
 
 ## Where things are stored
 
@@ -176,12 +207,12 @@ pin again from the Start Menu.
 The running version appears in the window title and the first line of the log. Every transcript
 also records it in its `Created by:` header line.
 
-This is **0.5.0** — working and tested, but pre-1.0 while the output format and the option set
+This is **0.8.0** — working and tested, but pre-1.0 while the output format and the option set
 settle. See [CHANGELOG.md](CHANGELOG.md).
 
 ## Not included
 
-Speaker labels ("who said what"), drag-and-drop, batch queues, and subtitle (`.srt`) export.
+Speaker labels ("who said what"), drag-and-drop, and subtitle (`.srt`) export.
 
 ## Design notes
 
