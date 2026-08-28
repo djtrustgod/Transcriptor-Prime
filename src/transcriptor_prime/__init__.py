@@ -2,11 +2,11 @@
 
 from pathlib import Path
 
-__version__ = "0.8.0"
+__version__ = "1.0.0"
 
 APP_NAME = "Transcriptor Prime"
 
-#: Name and version together, e.g. "Transcriptor Prime 0.8.0". Used in the
+#: Name and version together, e.g. "Transcriptor Prime 1.0.0". Used in the
 #: window title and stamped into every transcript header.
 APP_LABEL = f"{APP_NAME} {__version__}"
 

@@ -6,3 +6,8 @@
 # PyAV ships FFmpeg's libraries inside its wheel, which is why this app can
 # decode MP3/MP4/MKV/etc. without a separate ffmpeg install on the system.
 faster-whisper==1.2.1
+
+# CustomTkinter draws the widgets. It brings darkdetect, which reads the Windows
+# AppsUseLightTheme registry value -- that is how the app follows the system
+# light/dark setting -- plus packaging. Pure Python; no compiled extension.
+customtkinter==6.0.0

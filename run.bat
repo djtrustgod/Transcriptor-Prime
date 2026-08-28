@@ -42,6 +42,23 @@ if not exist "%PYTHON%" (
     echo.
 )
 
+rem  An existing .venv predates whatever requirements.txt asks for today, and
+rem  the block above only ever runs once. Probe the imports the app cannot
+rem  start without and top the environment up if any of them are missing.
+"%PYTHON%" -c "import customtkinter, faster_whisper, av" >nul 2>nul
+if errorlevel 1 (
+    echo Installing updated dependencies.
+    echo.
+    "%PYTHON%" -m pip install -r requirements.txt
+    if errorlevel 1 (
+        echo.
+        echo Dependency installation failed. See the messages above.
+        pause
+        exit /b 1
+    )
+    echo.
+)
+
 set "PYTHONPATH=%~dp0src"
 start "" "%~dp0.venv\Scripts\pythonw.exe" -m transcriptor_prime
 

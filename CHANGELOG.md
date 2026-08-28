@@ -5,6 +5,49 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0] - 2026-08-27
+
+The interface is rebuilt on CustomTkinter and follows the Windows light/dark setting.
+
+### Added
+
+- The window now **follows the system light/dark setting**, and switches live: change
+  *Settings → Personalisation → Colours → Choose your mode* while the app is open and the
+  window, the file queue and the title bar all follow within a frame.
+- An **Appearance** control in Options pins the window to *Light* or *Dark* regardless of what
+  the desktop is doing. It defaults to *System* and is remembered in `settings.json` as a new
+  `appearance` key.
+- A **Text size** control in Options — 100%, 115% or 130% — magnifies the whole window on top of
+  whatever the display already asks for, for anyone who wants it larger than the system default.
+  Remembered as a new `ui_scale` key. The window clamps itself to the desktop work area, so the
+  largest setting cannot open with its buttons behind the taskbar.
+- `src/transcriptor_prime/widgets.py`, holding the two pieces CustomTkinter does not ship: the
+  ttk-to-CustomTkinter colour bridge that paints the file queue, and a spinbox.
+
+### Changed
+
+- **The UI is CustomTkinter** rather than stock `ttk`. `customtkinter==6.0.0` is a new runtime
+  dependency; it brings `darkdetect`, which is what reads the Windows theme setting. Both are
+  pure Python and add roughly 1 MB to the first-run download.
+- `run.bat` now checks that the app's imports resolve before launching, and tops the environment
+  up if they do not. Previously dependencies were installed only when `.venv` was first created,
+  so an existing install would have started into a missing-module error.
+- The **file queue is still a `ttk.Treeview`** — CustomTkinter has no table widget — but is now
+  painted from CustomTkinter's active theme and repainted on every light/dark switch. Its status
+  colours gained dark-mode variants; the originals were near-black on a dark row.
+- The three spinboxes in Options are entry-plus-stepper widgets. Typing something that is not a
+  number still leaves the saved value untouched, exactly as before.
+- Progress is tracked as a fraction rather than a percentage, matching `CTkProgressBar`. This is
+  internal; the displayed percentages and ETAs are unchanged.
+
+### Fixed
+
+- Emptying a spinbox no longer prints an unhandled `TclError` traceback on every keystroke.
+- The window is no longer rendered undersized on a high-DPI display. The app asks Windows for
+  per-monitor DPI awareness rather than system DPI awareness, which is what lets CustomTkinter
+  scale the interface to the monitor; the file queue, which is outside that scaling, is scaled to
+  match. On a 150% display the window was a third smaller than it should have been.
+
 ## [0.8.0] - 2026-08-08
 
 Batch transcription: queue several files and let the app work through them.

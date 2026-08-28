@@ -1,6 +1,6 @@
 <img src="src/transcriptor_prime/assets/logo.png" alt="" width="88" align="right">
 
-# Transcriptor Prime 0.8.0
+# Transcriptor Prime 1.0.0
 
 A desktop app that turns audio or video recordings into plain-text transcripts with periodic
 timecodes. Everything runs **locally** — no cloud service, no API key, and nothing about your
@@ -50,6 +50,9 @@ pwsh -File tools\install_shortcuts.ps1 -Uninstall
 - Windows with Python 3.10 or newer ([python.org](https://python.org))
 - **No ffmpeg install needed** — media decoding is built in
 
+Upgrading from an earlier version needs nothing special: `run.bat` checks the app's dependencies
+on every launch and installs anything the existing environment is missing.
+
 ## Supported files
 
 Audio: `.mp3` `.m4a` `.wav` `.flac` `.ogg` `.opus` `.aac` `.wma`
@@ -79,6 +82,20 @@ Two settings are worth knowing about:
 - **Use preceding text for context** — on by default and generally better. Turn it off if the
   transcript ever gets stuck repeating a phrase.
 
+## Appearance
+
+The window follows the Windows light/dark setting, title bar included, and switches while it is
+open — change *Settings → Personalisation → Colours → Choose your mode* and the app follows
+without a restart.
+
+To pin it regardless of the desktop, set **Appearance** in Options to *Light* or *Dark*. The
+choice is remembered.
+
+If the interface is hard to read, **Text size** in Options enlarges the whole window — 100%, 115%
+or 130% on top of whatever Windows display scaling is already set to. 100% is the correct size for
+your monitor; the larger settings are deliberate extra magnification. The window never opens taller
+than the desktop, so at the largest setting on a small screen the log pane ends up short.
+
 ## What the transcript looks like
 
 `Timecode every` (default 30 seconds) controls how often a marker appears. Text is grouped into
@@ -90,7 +107,7 @@ Duration:   00:00:31
 Model:      small (int8, CPU)
 Language:   en (detected, 0.99)
 Generated:  2026-08-02 15:28
-Created by: Transcriptor Prime 0.8.0
+Created by: Transcriptor Prime 1.0.0
 
 ------------------------------------------------------------
 
@@ -185,10 +202,20 @@ use.
 The first use of each model size needs internet. Once downloaded it is cached permanently.
 
 **The app does not start after `run.bat`.**
-Delete the `.venv` folder and run it again to rebuild the environment from scratch.
+`run.bat` checks the app's dependencies on every launch and installs anything missing, so an
+upgrade that adds one heals itself. If it still will not start, delete the `.venv` folder and run
+it again to rebuild the environment from scratch.
 
 **The transcript repeats the same sentence over and over.**
 Uncheck *Use preceding text for context* and re-run.
+
+**Everything is too small to read.**
+Raise **Text size** in Options. If the whole app looks smaller than other programs at the same
+Windows scaling, that is a bug worth reporting — the app should match the display exactly at 100%.
+
+**The window is light while Windows is dark, or the other way round.**
+Set *Appearance* in Options back to *System*. If the desktop setting itself changed while the app
+was open it should follow within a frame; if it did not, restarting the app will pick it up.
 
 **Poor accuracy.**
 Move up a model size. `medium` handles accents, crosstalk and background noise far better than
@@ -207,8 +234,9 @@ pin again from the Start Menu.
 The running version appears in the window title and the first line of the log. Every transcript
 also records it in its `Created by:` header line.
 
-This is **0.8.0** — working and tested, but pre-1.0 while the output format and the option set
-settle. See [CHANGELOG.md](CHANGELOG.md).
+This is **1.0.0**. The transcript format and the option set are settled; changes to either from
+here will be additive, and anything that is not will get a major version. See
+[CHANGELOG.md](CHANGELOG.md).
 
 ## Not included
 
