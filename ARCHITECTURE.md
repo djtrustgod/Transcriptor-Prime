@@ -6,7 +6,8 @@
 src/transcriptor_prime/
   __init__.py    version, app name, taskbar identity, asset paths
   __main__.py    entry point; turns a startup crash into a dialog
-  app.py         Tk window, file queue, event pump       (the only Tk code)
+  app.py         the window, file queue, event pump
+  widgets.py     the queue's ttk theming and a spinbox   (app.py + this = all Tk)
   transcriber.py worker thread wrapping faster-whisper   (no Tk imports)
   formatting.py  timecodes and paragraph grouping        (pure functions)
   media.py       PyAV probe, folder scan, output naming
@@ -18,8 +19,8 @@ tools/
 ```
 
 The dependency direction is one-way: `app` → `transcriber` → `formatting`/`settings`. Nothing below
-`app` imports Tk, and `formatting` imports nothing from the project at all, which is what makes the
-transcript rules testable in milliseconds without a model or a display.
+`app`/`widgets` imports Tk, and `formatting` imports nothing from the project at all, which is what
+makes the transcript rules testable in milliseconds without a model or a display.
 
 ## Why this stack
 
@@ -32,8 +33,16 @@ write output incrementally instead of blocking for half an hour on an opaque cal
 with no system ffmpeg install — a meaningful simplification for a double-click desktop app. The
 same library probes duration and stream layout up front.
 
-**tkinter.** Ships with Python, so `run.bat` installs nothing for the UI and there is no packaging
-story to maintain. The app is one window; a heavier toolkit would buy nothing.
+**CustomTkinter, over stock tkinter.** The app is one window, so a heavyweight toolkit buys
+nothing — but stock `ttk` has no notion of a colour scheme, and a permanently light-grey window
+beside a dark desktop is the first thing anyone notices. CustomTkinter is a widget set drawn on Tk
+canvases, so it keeps Tk's event loop, `after()`, variables and geometry managers exactly as they
+were; the migration touched the widgets and nothing below them. It is pure Python and pulls in only
+`darkdetect` and `packaging`, so `run.bat` still has no compiled dependency to install for the UI.
+
+What it does not have is a table widget, a spinbox, a label-frame, or replacements for `filedialog`
+and `messagebox`. The first two are dealt with below; a label-frame is a heading label above a
+plain frame; and the two dialog modules stay stock, which on Windows means they are native.
 
 **Silero VAD (`vad_filter=True`).** Voice-activity detection skips silence, which both speeds up
 long recordings and suppresses Whisper's habit of inventing text over quiet passages — the failure
@@ -190,6 +199,79 @@ traceback never reaches the user.
 out-of-range values. `settings.save()` swallows OS errors: failing to persist a preference must
 never take the app down.
 
+## Appearance: following the system theme
+
+`_apply_appearance_mode()` runs before the first window and sets CustomTkinter's mode from the
+saved `appearance` preference. On the default `"system"`, CustomTkinter polls `darkdetect` — which
+reads the `AppsUseLightTheme` registry value — on the Tk event loop and pushes a Light/Dark switch
+through every widget, so a mid-session change to the Windows setting is picked up without a
+restart. `ctk.CTk` also calls `DwmSetWindowAttribute` with `DWMWA_USE_IMMERSIVE_DARK_MODE`, which
+is what carries the **title bar** across; a light title bar over a dark window is the tell that an
+app has been dark-mode-retrofitted badly.
+
+The Options panel's *System / Light / Dark* control writes `settings.appearance` and is saved on
+the same two paths as every other preference.
+
+### The queue is the exception
+
+CustomTkinter has no table widget, and the file queue needs four columns, multi-selection, stable
+per-row identity and a status colour per row. Rebuilding that on a `CTkScrollableFrame` means
+hand-writing selection and ordering, and `MAX_QUEUE` is 500 files — 2000 canvas-backed widgets. So
+the queue stays a `ttk.Treeview`, and `widgets.style_queue_tree()` paints it from
+`ctk.ThemeManager.theme` instead: colours are read from the loaded CustomTkinter theme rather than
+hardcoded a second time, so the two cannot drift.
+
+Three details are load-bearing:
+
+- **The `clam` ttk theme is required, not preferred.** It is the only stock theme whose Treeview
+  honours `background`/`fieldbackground`. Under the Windows native theme the rows stay white
+  whatever the style says. `clam` also draws its border from `bordercolor`/`lightcolor`/`darkcolor`
+  rather than `borderwidth`, so all three are set to the row background or the tree keeps a light
+  3D frame in dark mode.
+- **Row tags carry their own foreground**, so `tag_configure` has to be re-run on every switch or
+  finished rows keep their light-mode green on a dark background. The five status colours gained
+  dark variants for the same reason: `#1a7f37` on `#343638` is a near-black smudge.
+- **The repaint hook is CustomTkinter-internal.** Every CustomTkinter widget registers itself with
+  `AppearanceModeTracker`; a ttk widget has to be registered by hand.
+  `TranscriptorApp._watch_appearance_mode` does that inside a `try`, and the unconditional
+  `style_queue_tree()` call happens first — so if that tracker ever moves, the tree still renders
+  correctly and merely stops following a mid-session change. The callback is removed in `_on_close`,
+  because the tracker holds it in a module-level list and would otherwise fire against a destroyed
+  widget.
+
+### DPI, scaling, and the Text size control
+
+`_enable_dpi_awareness()` asks for **level 2, per-monitor**, and the level matters. Both level 1
+and level 2 tell Windows "do not magnify this window, the app scales itself" — but only level 2
+matches what CustomTkinter then does, which is read the monitor's DPI and scale every widget by it.
+Under level 1 CustomTkinter reads back 96 DPI, scales by 1.0, and the whole window renders a third
+smaller than intended on a 150% display: physically small and hard to read. This was shipped wrong
+once; the symptom is a window occupying 41% of the screen width where it should occupy 61%.
+
+Because CustomTkinter is the scaling authority, **`widgets.py` has to scale by hand** — row height,
+column widths and padding are all multiplied by `ScalingTracker.get_widget_scaling()`, or the ttk
+queue renders at two thirds the size of the window around it. The font is the subtle one:
+`theme_font()` reproduces CustomTkinter's own `_apply_font_scaling` arithmetic,
+`-abs(round(size * scale))`. The negation is load-bearing — Tk reads a *positive* size as points
+and multiplies it by `tk scaling` (about 2.0 on a 150% display) on top of everything else, so a
+positive 13 renders the queue at nearly twice the height of the label beside it.
+
+**Text size** (`settings.ui_scale`, one of `UI_SCALES`) multiplies on top of that via
+`set_widget_scaling`/`set_window_scaling`, so 100% is already the correct size for the monitor and
+the larger values are deliberate extra magnification for legibility. CustomTkinter's widgets redraw
+themselves on the change; the ttk queue is re-measured and repainted by hand in `_on_scale_change`.
+
+`_fit_to_screen()` exists because of that control. The window's natural height grows with the
+setting, and at the largest one on a small or heavily scaled display it would open taller than the
+desktop with the buttons behind the taskbar. It compares the requested size against the Windows
+work area (`SPI_GETWORKAREA`, which excludes the taskbar) and shrinks the window if needed; the log
+pane carries the layout's vertical weight, so it is what gives. One wrinkle: `CTk.geometry()`
+multiplies its argument by the window scaling on the way through, so the string is built in
+unscaled units rather than device pixels.
+
+The largest setting on a small panel leaves the log only a few lines tall. That is the trade the
+setting exists to offer, and the clamp is what keeps it merely cramped rather than unusable.
+
 ## Windows integration: icon and taskbar
 
 Three separate pieces have to line up before the app gets a proper taskbar button.
@@ -238,22 +320,32 @@ enforces this.
   for a three-job queue, a failing file leaves the others untouched, a cancel skips the remainder,
   and neither a bad file nor a fatal load emits `Done`/`Failed`. One test at the bottom, marked
   `slow`, does a genuine run with `tiny`.
-- `test_app.py` — builds the real Tk window and drives the handlers directly; skips where no
-  display exists. The Tk interpreter is session-scoped, with each test on its own `Toplevel`: a
-  fresh `tk.Tk()` per test failed intermittently, and the fixture's display check would have
-  reported any such failure as a skip rather than a failure. `TestQueue` covers add/remove/clear,
-  deduplication and the running-guard; `TestQueueOutputPaths` covers the single-file back-compat
-  surface that is most likely to rot.
+- `test_app.py` — builds the real window and drives the handlers directly; skips where no display
+  exists. The Tk interpreter is session-scoped and is a `ctk.CTk`, because CustomTkinter's scaling
+  and appearance trackers walk up `.master` looking for the root and register their polling loop
+  against it; each test then gets its own `CTkToplevel`. A fresh root per test failed
+  intermittently, and the fixture's display check would have reported any such failure as a skip
+  rather than a failure. `TestQueue` covers add/remove/clear, deduplication and the running-guard;
+  `TestQueueOutputPaths` covers the single-file back-compat surface that is most likely to rot;
+  `TestSpinbox` and `TestAppearance` cover the two pieces in `widgets.py`.
+- `test_branding.py` — parses the committed `.ico` and asserts the size set, the BMP/PNG split,
+  the file size ceiling, and that the taskbar identity round-trips through the Windows shell API.
 
-Two Tk behaviours were measured rather than assumed, and both shaped the code:
+Four toolkit behaviours were measured rather than assumed, and all four shaped the code:
 
-- **`ttk.Treeview` has no `-state` option.** `tree.config(state="disabled")` raises `TclError`, so
-  it cannot go in `_set_running`'s widget loop; `tree.state(["disabled"])` is used instead.
+- **`ttk.Treeview` has no `-state` option.** `tree.configure(state="disabled")` raises `TclError`,
+  so it cannot go in `_set_running`'s widget loop; `tree.state(["disabled"])` is used instead.
 - **A "disabled" Treeview still accepts clicks.** `state(["disabled"])` only greys the rows. The
   `self.running` flag, checked at the top of every queue handler, is what actually protects the
   queue during a run — there is a test that pins exactly this.
-- `test_branding.py` — parses the committed `.ico` and asserts the size set, the BMP/PNG split,
-  the file size ceiling, and that the taskbar identity round-trips through the Windows shell API.
+- **`.config()` does not reach a CustomTkinter widget's `configure()`.** `tkinter` binds
+  `Misc.config = Misc.configure` at class-definition time, so the alias resolves to the base
+  implementation and silently skips every override. `_set_running` calls `.configure()` throughout.
+- **`CTkEntry` traces its own textvariable and calls `get()` on it**, which throws the moment the
+  box is emptied — an unhandled traceback on every keystroke if the variable is an `IntVar`. So
+  `CTkSpinbox` drives its entry with a private `StringVar` and mirrors that into the caller's
+  `IntVar`. The `IntVar` still ends up holding the raw text, which is what keeps
+  `_capture_settings`' existing `TclError` fallback meaningful.
 
 The stub-plus-one-real-run split is deliberate: the fast tests can run on every change, and the
 `slow` marker keeps the genuine end-to-end check one command away.

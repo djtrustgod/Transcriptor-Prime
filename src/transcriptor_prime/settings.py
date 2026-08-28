@@ -19,6 +19,16 @@ MODEL_NOTES = {
     "large-v3": "most accurate, impractical on CPU  (3h+ for 3h)",
 }
 
+# Window appearance. "system" follows the Windows light/dark setting live; the
+# other two pin it regardless of what the desktop is doing.
+APPEARANCE_MODES = ("system", "light", "dark")
+
+# Extra magnification on top of the display's own scaling, as a percentage.
+# 100 means "exactly what Windows asks for"; the larger values are for anyone
+# who wants the window bigger than that. Capped at 130 because the window has
+# to stay shorter than a 1080p screen at the largest setting.
+UI_SCALES = (100, 115, 130)
+
 # Whisper language codes worth surfacing; "auto" lets Whisper detect. Forcing a
 # language is worth doing when you know it, as detection samples only the
 # opening audio and can be wrong on a noisy intro.
@@ -76,6 +86,8 @@ class Settings:
     cpu_threads: int = 0  # 0 means "use default_cpu_threads()"
     condition_on_previous_text: bool = True
     scan_subfolders: bool = False  # whether "Add folder…" recurses
+    appearance: str = "system"  # one of APPEARANCE_MODES
+    ui_scale: int = 100  # one of UI_SCALES; percent, on top of display scaling
     last_input_dir: str = ""
     last_output_dir: str = ""
 
@@ -88,6 +100,10 @@ class Settings:
             self.model = "small"
         if self.language not in {code for _, code in LANGUAGES}:
             self.language = "auto"
+        if self.appearance not in APPEARANCE_MODES:
+            self.appearance = "system"
+        if self.ui_scale not in UI_SCALES:
+            self.ui_scale = 100
         self.interval_seconds = max(5, min(600, int(self.interval_seconds)))
         self.wrap_width = max(0, min(300, int(self.wrap_width)))
         self.cpu_threads = max(0, min(64, int(self.cpu_threads)))

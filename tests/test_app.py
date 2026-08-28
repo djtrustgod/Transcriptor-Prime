@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 tk = pytest.importorskip("tkinter")
+ctk = pytest.importorskip("customtkinter")
 
 from transcriptor_prime import APP_LABEL, ICON_PATH, media  # noqa: E402
 from transcriptor_prime import app as app_mod  # noqa: E402
@@ -43,13 +44,17 @@ from transcriptor_prime.transcriber import (  # noqa: E402
 def tk_root():
     """One Tk interpreter for the whole session.
 
-    Creating a fresh ``tk.Tk()`` per test churned through 35 interpreters and
-    turned out to fail intermittently. Just as importantly, deciding
-    "is there a display?" once means an unexpected TclError inside a test is
-    reported as a failure instead of being swallowed as a skip.
+    Creating a fresh root per test churned through 35 interpreters and turned
+    out to fail intermittently. Just as importantly, deciding "is there a
+    display?" once means an unexpected TclError inside a test is reported as a
+    failure instead of being swallowed as a skip.
+
+    It is a ``ctk.CTk`` rather than a ``tk.Tk`` because CustomTkinter's scaling
+    and appearance trackers walk up ``.master`` looking for the root window and
+    register their polling loop against it.
     """
     try:
-        root = tk.Tk()
+        root = ctk.CTk()
     except tk.TclError as exc:  # pragma: no cover - headless environment
         pytest.skip(f"no display available: {exc}")
     root.withdraw()
@@ -61,11 +66,13 @@ def tk_root():
 def app(tk_root, tmp_path, monkeypatch):
     """A fresh app on its own Toplevel, so tests cannot leak state into each other."""
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
-    window = tk.Toplevel(tk_root)
+    window = ctk.CTkToplevel(tk_root)
     window.withdraw()
     instance = TranscriptorApp(window)
     window.update()
     yield instance
+    if instance._appearance_callback is not None:
+        ctk.AppearanceModeTracker.remove(instance._appearance_callback)
     window.destroy()
 
 
@@ -145,22 +152,22 @@ class TestWindowIcon:
 class TestWindow:
     def test_builds_and_starts_idle(self, app):
         assert app.var_status.get() == "Idle."
-        assert str(app.btn_cancel["state"]) == "disabled"
-        assert str(app.btn_start["state"]) == "normal"
-        assert str(app.btn_open["state"]) == "disabled"
+        assert app.btn_cancel.cget("state") == "disabled"
+        assert app.btn_start.cget("state") == "normal"
+        assert app.btn_open.cget("state") == "disabled"
 
     def test_running_state_locks_the_inputs(self, app):
         app._set_running(True)
-        assert str(app.btn_start["state"]) == "disabled"
-        assert str(app.btn_browse["state"]) == "disabled"
-        assert str(app.cmb_model["state"]) == "disabled"
-        assert str(app.btn_cancel["state"]) == "normal"
+        assert app.btn_start.cget("state") == "disabled"
+        assert app.btn_browse.cget("state") == "disabled"
+        assert app.cmb_model.cget("state") == "disabled"
+        assert app.btn_cancel.cget("state") == "normal"
 
         app._set_running(False)
-        assert str(app.btn_start["state"]) == "normal"
+        assert app.btn_start.cget("state") == "normal"
         # Comboboxes must go back to readonly, not plain normal, so the user
         # cannot type an invalid model name into them.
-        assert str(app.cmb_model["state"]) == "readonly"
+        assert app.cmb_model.cget("state") == "readonly"
 
 
 class TestSourceSelection:
@@ -203,7 +210,7 @@ class TestSourceSelection:
 class TestEventHandling:
     def test_progress_updates_the_bar_and_labels(self, app):
         app._handle(Progress(audio_done=1800.0, audio_total=3600.0, elapsed=300.0, eta=300.0))
-        assert app.var_progress.get() == pytest.approx(50.0)
+        assert app.var_progress.get() == pytest.approx(0.5)
         assert "50%" in app.var_percent.get()
         assert "00:30:00" in app.var_percent.get()
         assert "01:00:00" in app.var_percent.get()
@@ -216,9 +223,9 @@ class TestEventHandling:
 
         app._handle(Done(output=output, elapsed=42.0))
 
-        assert str(app.btn_open["state"]) == "normal"
-        assert str(app.btn_start["state"]) == "normal"
-        assert app.var_progress.get() == pytest.approx(100.0)
+        assert app.btn_open.cget("state") == "normal"
+        assert app.btn_start.cget("state") == "normal"
+        assert app.var_progress.get() == pytest.approx(1.0)
         assert "Done" in app.var_status.get()
 
     def test_cancelled_job_is_reported_as_partial(self, app, tmp_path):
@@ -239,7 +246,7 @@ class TestEventHandling:
         app._handle(Failed(message="something went wrong"))
 
         assert app.var_status.get() == "Failed."
-        assert str(app.btn_start["state"]) == "normal"
+        assert app.btn_start.cget("state") == "normal"
 
     def test_status_messages_reach_the_log(self, app):
         app._handle(Status("Detected language: en"))
@@ -355,14 +362,14 @@ class TestQueueOutputPaths:
     def test_two_queued_files_disable_the_save_to_box(self, app, two_clips):
         app._add_paths(two_clips)
 
-        assert str(app.entry_output["state"]) == "disabled"
-        assert str(app.btn_saveas["state"]) == "disabled"
+        assert app.entry_output.cget("state") == "disabled"
+        assert app.btn_saveas.cget("state") == "disabled"
         assert app.var_output.get() == app_mod.BATCH_OUTPUT_HINT
 
     def test_a_single_queued_file_keeps_the_save_to_box_editable(self, app, two_clips):
         app._set_source(two_clips[0])
 
-        assert str(app.entry_output["state"]) == "normal"
+        assert app.entry_output.cget("state") == "normal"
         assert Path(app.var_output.get()) == two_clips[0].with_suffix(".txt")
 
     def test_dropping_back_to_one_file_restores_the_manual_save_path(
@@ -379,7 +386,7 @@ class TestQueueOutputPaths:
         app._on_remove()
 
         assert app.var_output.get() == r"D:\elsewhere\mine.txt"
-        assert str(app.entry_output["state"]) == "normal"
+        assert app.entry_output.cget("state") == "normal"
 
     def test_output_paths_are_unique_within_a_batch(self, app, tmp_path, tone_mp3, tone_mp4):
         """talk.mp3 and talk.mp4 both want talk.txt, and neither exists yet."""
@@ -462,8 +469,8 @@ class TestBatchEventHandling:
 
         status = running_app.var_status.get()
         assert "1 succeeded" in status and "1 failed" in status
-        assert str(running_app.btn_start["state"]) == "normal"
-        assert str(running_app.btn_open["state"]) == "normal"
+        assert running_app.btn_start.cget("state") == "normal"
+        assert running_app.btn_open.cget("state") == "normal"
         assert running_app.last_output == output
 
     def test_batch_finished_marks_unstarted_rows_skipped(self, running_app):
@@ -491,8 +498,8 @@ class TestBatchEventHandling:
             Progress(audio_done=50.0, audio_total=100.0, elapsed=10.0, eta=10.0,
                      file_index=1, file_count=4, batch_done=150.0, batch_total=400.0)
         )
-        assert app.var_batch_progress.get() == pytest.approx(37.5)
-        assert app.var_progress.get() == pytest.approx(50.0)
+        assert app.var_batch_progress.get() == pytest.approx(0.375)
+        assert app.var_progress.get() == pytest.approx(0.5)
         assert "File 2 of 4" in app.var_batch_percent.get()
 
     def test_the_overall_bar_is_hidden_for_a_single_file(self, app, two_clips):
@@ -536,3 +543,126 @@ def test_start_with_an_empty_queue_warns_instead_of_crashing(app, monkeypatch):
 def test_supported_extensions_cover_the_expected_inputs():
     for extension in (".mp3", ".mp4", ".m4a", ".wav", ".mkv", ".mov"):
         assert extension in media.SUPPORTED_EXTENSIONS
+
+
+class TestSpinbox:
+    """CustomTkinter has no spinbox; widgets.CTkSpinbox stands in for three."""
+
+    def test_stepping_clamps_at_both_bounds(self, app):
+        app.var_interval.set(600)
+        app.spn_interval._nudge(5)
+        assert app.var_interval.get() == 600  # upper bound is 600
+
+        app.var_interval.set(5)
+        app.spn_interval._nudge(-5)
+        assert app.var_interval.get() == 5  # lower bound is 5
+
+        app.var_interval.set(30)
+        app.spn_interval._nudge(5)
+        assert app.var_interval.get() == 35
+
+    def test_an_emptied_box_leaves_the_variable_unreadable(self, app):
+        """_capture_settings' fallback depends on the TclError still being raised."""
+        app.spn_wrap.entry.delete(0, "end")
+        app.root.update()
+
+        with pytest.raises(tk.TclError):
+            app.var_wrap.get()
+
+        # ...and _capture_settings must survive that rather than propagate it.
+        app._capture_settings()
+        assert app.settings.wrap_width == 100  # the saved value, untouched
+
+    def test_typed_text_reaches_the_variable(self, app):
+        app.spn_threads.entry.delete(0, "end")
+        app.spn_threads.entry.insert(0, "12")
+        app.root.update()
+
+        assert app.var_threads.get() == 12
+
+    def test_stepping_an_emptied_box_recovers_instead_of_raising(self, app):
+        app.spn_wrap.entry.delete(0, "end")
+
+        app.spn_wrap._nudge(10)
+
+        # from_ is 0, so an unreadable box steps up from there.
+        assert app.var_wrap.get() == 10
+
+    def test_state_reaches_the_children(self, app):
+        app.spn_threads.configure(state="disabled")
+
+        assert app.spn_threads.cget("state") == "disabled"
+        assert app.spn_threads.entry.cget("state") == "disabled"
+        assert app.spn_threads.btn_up.cget("state") == "disabled"
+
+
+class TestAppearance:
+    def test_the_control_starts_on_the_saved_mode(self, app):
+        assert app.seg_appearance.get() == "System"
+        assert app.settings.appearance == "system"
+
+    def test_choosing_a_mode_records_it(self, app):
+        app._on_appearance_change("Dark")
+
+        assert app.settings.appearance == "dark"
+        assert ctk.get_appearance_mode() == "Dark"
+
+        # Leave the interpreter as we found it: the appearance mode is global.
+        app._on_appearance_change("System")
+
+    def test_capture_settings_reads_the_control_back(self, app):
+        app.seg_appearance.set("Light")
+
+        app._capture_settings()
+
+        assert app.settings.appearance == "light"
+
+    def test_the_queue_tree_is_repainted_for_the_current_mode(self, app):
+        """The Treeview is ttk, so it only tracks the theme via this call."""
+        from tkinter import ttk
+
+        from transcriptor_prime.widgets import STATUS_COLORS, pick, style_queue_tree
+
+        style_queue_tree(app.tree)
+
+        assert ttk.Style(app.tree).theme_use() == "clam"
+        # tag_configure hands back a Tcl object, not a str.
+        assert str(app.tree.tag_configure("done", "foreground")) == pick(
+            STATUS_COLORS["done"]
+        )
+
+
+class TestUiScale:
+    """The Text size control magnifies on top of the display's own scaling."""
+
+    def test_the_control_starts_on_the_saved_scale(self, app):
+        assert app.seg_scale.get() == "100%"
+        assert app.settings.ui_scale == 100
+
+    def test_choosing_a_size_records_and_applies_it(self, app):
+        try:
+            app._on_scale_change("130%")
+
+            assert app.settings.ui_scale == 130
+            assert ctk.ScalingTracker.widget_scaling == pytest.approx(1.3)
+        finally:
+            # Scaling is global to the interpreter; do not leak it into the
+            # next test's geometry assertions.
+            app._on_scale_change("100%")
+
+    def test_capture_settings_reads_the_control_back(self, app):
+        app.seg_scale.set("115%")
+
+        app._capture_settings()
+
+        assert app.settings.ui_scale == 115
+
+    def test_the_window_is_clamped_to_the_desktop(self, app):
+        """The largest size must not open taller than the screen can show."""
+        from transcriptor_prime.app import _work_area
+
+        avail_w, avail_h = _work_area(app.root)
+        app.root.update_idletasks()
+
+        assert app.root.winfo_reqwidth() <= avail_w
+        assert app.root.winfo_reqheight() <= avail_h

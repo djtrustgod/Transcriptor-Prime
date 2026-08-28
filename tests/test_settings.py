@@ -28,6 +28,22 @@ def test_round_trip(app_dir: Path):
     assert (loaded.model, loaded.language, loaded.interval_seconds) == ("medium", "es", 45)
 
 
+def test_appearance_round_trips_and_is_clamped(app_dir: Path):
+    settings_mod.save(Settings(appearance="dark"))
+    assert settings_mod.load().appearance == "dark"
+
+    settings_mod.save(Settings(appearance="neon"))
+    assert settings_mod.load().appearance == "system"
+
+
+def test_ui_scale_round_trips_and_is_clamped(app_dir: Path):
+    settings_mod.save(Settings(ui_scale=130))
+    assert settings_mod.load().ui_scale == 130
+
+    settings_mod.save(Settings(ui_scale=400))  # not one of UI_SCALES
+    assert settings_mod.load().ui_scale == 100
+
+
 def test_corrupt_file_falls_back_to_defaults(app_dir: Path):
     path = settings_mod.settings_path()
     path.parent.mkdir(parents=True, exist_ok=True)
