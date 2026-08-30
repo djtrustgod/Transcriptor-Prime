@@ -10,7 +10,7 @@ Built for long recordings: a three-hour interview transcribes with a live progre
 be cancelled at any point, and writes text to disk as it goes so a crash never costs you the whole
 run. Queue a folder of them and leave it running.
 
-## Quick start
+## Quick start (Windows)
 
 Double-click **`run.bat`**.
 
