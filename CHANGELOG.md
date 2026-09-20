@@ -5,6 +5,44 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [2.0.0] - 2026-09-19
+
+The transcript can now say who is talking, and a new window puts names to the voices.
+
+### Added
+
+- **Speaker identification.** Tick *Identify speakers (who said what)* in Options and the
+  transcript names who is talking: `[00:00:07] Speaker 2:` on each paragraph's timecode line, a
+  new paragraph on every change of speaker, and a `Speakers:` line in the header. Speakers are
+  numbered in the order they first speak. A *Speakers* box takes the number of people when it is
+  known, which is markedly more reliable than letting the app work it out.
+- **Name speakers… window.** Lists each voice with sample quotes and a **Play sample** button
+  that plays a few seconds of it from the recording; type a name beside each and the `.txt` is
+  rewritten in place. It opens by itself after a single-file run, never during a queue, and can
+  be pointed at any earlier transcript. Two voices given the same name are merged. Names are
+  stored only in the transcript — there is no sidecar file.
+- The speaker pass runs through [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) in a
+  separate process, so it can be cancelled instantly and cannot freeze or crash the window. Its
+  two models (about 33 MB) download on first use into the existing `models` folder. No PyTorch,
+  no account, no token.
+- With the speaker count on auto, a "speaker" amounting to a second or two of sound is folded
+  into the surrounding speaker instead of becoming a person of its own.
+- A file whose speaker pass fails is still transcribed, without labels, and the log says why. A
+  speaker engine that cannot start at all stops the queue before the first file.
+- `tools/diarization_spike.py` measures the speaker pass on the current machine.
+
+### Changed
+
+- The file queue shows five rows instead of six, which pays for the new Options row so the log
+  pane keeps its height at the largest Text size.
+- The first-run dependency download grows from about 150 MB to about 170 MB (`sherpa-onnx` and
+  `sherpa-onnx-core`). `run.bat` installs them into an existing environment by itself.
+- "Cancelled before any text was produced." is now logged when a cancel lands before a file has
+  written anything.
+- Transcripts made **without** speaker identification are byte-for-byte what they were in 1.0.0.
+
 ## [1.0.0] - 2026-08-27
 
 The interface is rebuilt on CustomTkinter and follows the Windows light/dark setting.

@@ -3,7 +3,7 @@ rem ---------------------------------------------------------------------
 rem  Transcriptor Prime launcher.
 rem
 rem  First run: creates a .venv next to this file and installs dependencies
-rem  (~150 MB download). Every run after that starts the app directly.
+rem  (~170 MB download). Every run after that starts the app directly.
 rem ---------------------------------------------------------------------
 setlocal
 cd /d "%~dp0"
@@ -12,7 +12,7 @@ set "PYTHON=.venv\Scripts\python.exe"
 
 if not exist "%PYTHON%" (
     echo First run - setting up a private Python environment.
-    echo This downloads about 150 MB and takes a few minutes.
+    echo This downloads about 170 MB and takes a few minutes.
     echo.
 
     where py >nul 2>nul
@@ -45,7 +45,7 @@ if not exist "%PYTHON%" (
 rem  An existing .venv predates whatever requirements.txt asks for today, and
 rem  the block above only ever runs once. Probe the imports the app cannot
 rem  start without and top the environment up if any of them are missing.
-"%PYTHON%" -c "import customtkinter, faster_whisper, av" >nul 2>nul
+"%PYTHON%" -c "import customtkinter, faster_whisper, av, sherpa_onnx" >nul 2>nul
 if errorlevel 1 (
     echo Installing updated dependencies.
     echo.

@@ -28,7 +28,16 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Sequence
 
+from transcriptor_prime import diarizer as diarizer_mod
 from transcriptor_prime import settings as settings_mod
+from transcriptor_prime import speakers as speakers_mod
+from transcriptor_prime.attribution import (
+    SpeakerNamer,
+    Timeline,
+    Turn,
+    absorb_minor_speakers,
+    split_segment,
+)
 from transcriptor_prime.formatting import ParagraphBuilder, build_header, format_duration
 
 
@@ -55,6 +64,8 @@ class Job:
     cpu_threads: int
     duration: float  # from media.probe, used for the progress denominator
     condition_on_previous_text: bool = True
+    identify_speakers: bool = False
+    num_speakers: int = 0  # 0 lets the engine work the number out
 
 
 @dataclass(frozen=True)
@@ -80,6 +91,10 @@ class Progress:
     batch_total: float = 0.0  # 0.0 when some duration is unknown
     batch_elapsed: float = 0.0
     batch_eta: float | None = None
+    # "speakers" while the file is being listened to for who is talking, a
+    # separate pass that comes first. The file bar runs 0-100% for each phase;
+    # the queue bar only ever counts transcription, and holds still meanwhile.
+    phase: str = "transcribe"
 
     @property
     def fraction(self) -> float:
@@ -134,6 +149,7 @@ class FileFinished:
     elapsed: float
     status: str  # COMPLETED | CANCELLED | FAILED
     message: str = ""  # friendly text when status is FAILED
+    speakers: int = 0  # how many speakers the transcript names; 0 = unlabelled
 
 
 @dataclass(frozen=True)
@@ -169,6 +185,7 @@ def transcribe(job: Job, emit: Emit, cancel: threading.Event) -> None:
     """
     try:
         model = _build_model(job.model, job.cpu_threads, emit)
+        diar = _prepare_diarizer([job], emit)
     except Exception as exc:  # surfaced in the log pane, never as a traceback
         emit(Failed(_friendly_error(exc)))
         return
@@ -180,7 +197,7 @@ def transcribe(job: Job, emit: Emit, cancel: threading.Event) -> None:
         emit(Done(output=job.output, elapsed=0.0, partial=True))
         return
 
-    result = _run_one(job, model, emit, cancel)
+    result = _run_one(job, model, emit, cancel, diar=diar)
     if result.status == FAILED:
         emit(Failed(result.message))
     else:
@@ -232,6 +249,10 @@ def transcribe_batch(
 
     try:
         model = _build_model(jobs[0].model, jobs[0].cpu_threads, emit)
+        # Inside the same guard on purpose: a queue that asked for speakers and
+        # cannot have them stops here, rather than quietly producing a night's
+        # worth of transcripts with nobody named in them.
+        diar = _prepare_diarizer(jobs, emit)
     except Exception as exc:
         message = _friendly_error(exc)
         emit(Status(f"ERROR: {message}"))
@@ -281,6 +302,7 @@ def transcribe_batch(
             model,
             emit,
             cancel,
+            diar=diar,
             span=_BatchSpan(
                 file_index=index,
                 file_count=count,
@@ -310,6 +332,7 @@ def transcribe_batch(
                 elapsed=result.elapsed,
                 status=result.status,
                 message=result.message,
+                speakers=result.speakers,
             )
         )
 
@@ -338,6 +361,7 @@ class _Result:
     output: Path | None
     elapsed: float
     message: str = ""
+    speakers: int = 0
 
 
 @dataclass(frozen=True)
@@ -359,13 +383,29 @@ def _run_one(
     cancel: threading.Event,
     *,
     span: _BatchSpan | None = None,
+    diar: diarizer_mod.Diarizer | None = None,
 ) -> _Result:
     """Transcribe one file with an already-loaded model. Never raises."""
     started = time.monotonic()
     part_path = job.output.with_suffix(job.output.suffix + ".part")
 
     try:
+        turns: list[Turn] | None = None
+        if diar is not None and job.identify_speakers:
+            try:
+                turns = _identify_speakers(job, diar, emit, cancel, started, span)
+            except diarizer_mod.Cancelled:
+                # Nothing has been written yet, so there is no partial file.
+                return _Result(CANCELLED, None, time.monotonic() - started)
+
         emit(Status("Analyzing audio…"))
+        options = {}
+        if turns:
+            # Only asked for when there are speakers to line the words up with:
+            # it costs time, and leaving it out keeps a run without speaker
+            # identification exactly what it was before the feature existed.
+            options["word_timestamps"] = True
+        transcribing_from = time.monotonic()
         segments, info = model.transcribe(
             str(job.source),
             beam_size=5,
@@ -373,6 +413,7 @@ def _run_one(
             vad_parameters={"min_silence_duration_ms": 500},
             language=None if job.language == "auto" else job.language,
             condition_on_previous_text=job.condition_on_previous_text,
+            **options,
         )
 
         detected = job.language == "auto"
@@ -392,7 +433,7 @@ def _run_one(
         total = info.duration or job.duration or 0.0
 
         job.output.parent.mkdir(parents=True, exist_ok=True)
-        completed = _write_transcript(
+        completed, named = _write_transcript(
             job=job,
             part_path=part_path,
             segments=segments,
@@ -404,22 +445,126 @@ def _run_one(
             cancel=cancel,
             started=started,
             span=span,
+            turns=turns,
+            rate_started=transcribing_from,
         )
 
         elapsed = time.monotonic() - started
         if completed:
             os.replace(part_path, job.output)  # atomic on the same volume
-            return _Result(COMPLETED, job.output, elapsed)
+            return _Result(COMPLETED, job.output, elapsed, speakers=named)
 
         partial = job.output.with_name(job.output.stem + ".partial.txt")
         os.replace(part_path, partial)
-        return _Result(CANCELLED, partial, elapsed)
+        return _Result(CANCELLED, partial, elapsed, speakers=named)
 
     except Exception as exc:  # surfaced in the log pane, never as a traceback
         _discard(part_path)
         return _Result(
             FAILED, None, time.monotonic() - started, _friendly_error(exc)
         )
+
+
+def _prepare_diarizer(
+    jobs: Sequence[Job], emit: Emit
+) -> diarizer_mod.Diarizer | None:
+    """Ready the speaker engine if any job wants it. Raises with a usable message."""
+    if not any(job.identify_speakers for job in jobs):
+        return None
+    try:
+        return diarizer_mod.prepare(lambda message: emit(Status(message)))
+    except Exception as exc:
+        raise RuntimeError(
+            f"Speaker identification could not be set up. {_friendly_error(exc)} "
+            "Untick 'Identify speakers' to transcribe without it."
+        ) from exc
+
+
+def _identify_speakers(
+    job: Job,
+    diar: diarizer_mod.Diarizer,
+    emit: Emit,
+    cancel: threading.Event,
+    started: float,
+    span: _BatchSpan | None,
+) -> list[Turn] | None:
+    """Who spoke when, or ``None`` if that could not be worked out.
+
+    A failure here costs the labels, not the transcript: the file is still
+    transcribed, in the plain format. Raises :class:`diarizer.Cancelled`.
+    """
+    emit(Status("Identifying speakers…"))
+    last_update = 0.0
+
+    def on_progress(done: int, total: int) -> None:
+        nonlocal last_update
+        now = time.monotonic()
+        if now - last_update < _UPDATE_INTERVAL:
+            return
+        last_update = now
+        fraction = done / total if total > 0 else 0.0
+        emit(_speaker_progress(fraction, job.duration, started, span))
+
+    try:
+        turns = diar.run(
+            job.source,
+            num_speakers=job.num_speakers,
+            threads=job.cpu_threads,
+            duration=job.duration,
+            cancel=cancel,
+            on_progress=on_progress,
+        )
+    except diarizer_mod.DiarizationError as exc:
+        emit(
+            Status(
+                f"Speaker identification failed for {job.source.name} ({exc}) — "
+                "transcribing without speaker labels."
+            )
+        )
+        return None
+
+    if not turns:
+        emit(
+            Status(
+                "No speech found to tell speakers apart — "
+                "transcribing without speaker labels."
+            )
+        )
+        return None
+
+    if job.num_speakers <= 0:
+        # The engine chose the count, and tends to choose one too many.
+        turns = absorb_minor_speakers(turns)
+
+    found = len({turn.speaker for turn in turns})
+    emit(Status(f"Found {found} speaker{'s' if found != 1 else ''}."))
+    emit(_speaker_progress(1.0, job.duration, started, span))
+    return turns
+
+
+def _speaker_progress(
+    fraction: float, duration: float, started: float, span: _BatchSpan | None
+) -> Progress:
+    """A Progress event for the speaker pass. The queue bar does not move."""
+    total = duration if duration > 0 else 1.0
+    common = dict(
+        audio_done=fraction * total,
+        audio_total=total,
+        elapsed=time.monotonic() - started,
+        eta=None,
+        phase="speakers",
+    )
+    if span is None:
+        return Progress(**common)
+    return Progress(
+        **common,
+        file_index=span.file_index,
+        file_count=span.file_count,
+        batch_done=span.audio_before,
+        batch_total=span.audio_total,
+        batch_elapsed=max(0.0, time.monotonic() - span.throughput_started),
+        batch_eta=None,
+    )
 
 
 def _build_model(model: str, cpu_threads: int, emit: Emit):
@@ -482,11 +627,39 @@ def _write_transcript(
     cancel: threading.Event,
     started: float,
     span: _BatchSpan | None = None,
-) -> bool:
-    """Stream segments to ``part_path``. Returns True if the audio ran to the end."""
+    turns: Sequence[Turn] | None = None,
+    rate_started: float | None = None,
+) -> tuple[bool, int]:
+    """Stream segments to ``part_path``.
+
+    Returns ``(ran to the end of the audio, number of speakers named)``.
+    """
     builder = ParagraphBuilder(interval_seconds=job.interval_seconds)
     last_update = 0.0
     audio_done = 0.0
+
+    timeline = Timeline(turns) if turns else None
+    namer = SpeakerNamer()
+    previous: int | None = None
+    # The header is written before anyone has spoken, so it can only promise
+    # one name per voice the engine found. It is trued up once the file closes.
+    expected = len({turn.speaker for turn in turns}) if turns else 0
+
+    def render(segment) -> str:
+        """This segment's finished paragraphs, as text ready to write."""
+        nonlocal previous
+        if timeline is None:
+            blocks = builder.add_run(segment.start, segment.end, segment.text)
+        else:
+            blocks = []
+            for run in split_segment(segment, timeline, previous):
+                previous = run.speaker
+                blocks += builder.add_run(
+                    run.start, run.end, run.text, namer.label(run.speaker)
+                )
+        return "".join(block.render(job.wrap_width) + "\n" for block in blocks)
+
+    completed = True
 
     with open(part_path, "w", encoding="utf-8", newline="\n") as fh:
         fh.write(
@@ -498,6 +671,7 @@ def _write_transcript(
                 language_detected=language_detected,
                 language_probability=language_probability,
                 generated_at=datetime.now(),
+                speakers=[f"Speaker {n + 1}" for n in range(expected)] or None,
             )
         )
         fh.flush()
@@ -505,43 +679,56 @@ def _write_transcript(
         emit(Status("Transcribing…"))
         for segment in segments:
             if cancel.is_set():
-                # Keep whatever is buffered rather than dropping the last
-                # partial paragraph on the floor.
-                block = builder.flush()
-                if block:
-                    fh.write(block.render(job.wrap_width) + "\n")
-                fh.flush()
-                return False
+                completed = False
+                break
 
-            block = builder.add(segment.start, segment.end, segment.text)
-            if block:
-                fh.write(block.render(job.wrap_width) + "\n")
+            fh.write(render(segment))
 
             audio_done = max(audio_done, float(segment.end))
             now = time.monotonic()
             if now - last_update >= _UPDATE_INTERVAL:
                 last_update = now
                 fh.flush()
-                emit(_progress(audio_done, total, started, span))
+                emit(_progress(audio_done, total, started, span, rate_started))
 
+        # On a cancel too: keep whatever is buffered rather than dropping the
+        # last partial paragraph on the floor.
         block = builder.flush()
         if block:
             fh.write(block.render(job.wrap_width) + "\n")
         fh.flush()
 
-    emit(_progress(total, total, started, span))
-    return True
+    named = len(namer.labels)
+    if timeline is not None and named != expected:
+        # A voice the engine heard never had a word attributed to it — noise,
+        # or a cancel before its turn came.
+        try:
+            speakers_mod.sync_header(part_path)
+        except OSError:
+            pass  # a cosmetic line; never worth failing the transcript over
+
+    if completed:
+        emit(_progress(total, total, started, span, rate_started))
+    return completed, named
 
 
 def _progress(
-    audio_done: float, total: float, started: float, span: _BatchSpan | None = None
+    audio_done: float,
+    total: float,
+    started: float,
+    span: _BatchSpan | None = None,
+    rate_started: float | None = None,
 ) -> Progress:
     elapsed = time.monotonic() - started
+    # The speaker pass comes first and can take minutes. Timing the rate from
+    # when transcription itself began keeps those minutes out of the ETA, while
+    # `elapsed` — what the user is shown — still counts from the file's start.
+    working = time.monotonic() - (started if rate_started is None else rate_started)
     eta: float | None = None
-    # `elapsed` can still be 0.0 on the first event — the clock's resolution is
+    # `working` can still be 0.0 on the first event — the clock's resolution is
     # coarser than a fast model's first segment.
-    if audio_done > 1.0 and total > 0 and elapsed > 0:
-        rate = audio_done / elapsed  # seconds of audio per second of wall clock
+    if audio_done > 1.0 and total > 0 and working > 0:
+        rate = audio_done / working  # seconds of audio per second of wall clock
         if rate > 0:
             eta = max(0.0, (total - audio_done) / rate)
 

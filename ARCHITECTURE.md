@@ -7,8 +7,13 @@ src/transcriptor_prime/
   __init__.py    version, app name, taskbar identity, asset paths
   __main__.py    entry point; turns a startup crash into a dialog
   app.py         the window, file queue, event pump
-  widgets.py     the queue's ttk theming and a spinbox   (app.py + this = all Tk)
+  speaker_dialog.py  the "Name speakers" window
+  widgets.py     the queue's ttk theming and a spinbox   (these three = all Tk)
   transcriber.py worker thread wrapping faster-whisper   (no Tk imports)
+  diarizer.py    launches and supervises the speaker engine's child process
+  diarize_worker.py  that child: the only importer of sherpa_onnx
+  attribution.py which speaker said each word            (pure functions)
+  speakers.py    reads and renames speakers in a saved .txt (pure functions)
   formatting.py  timecodes and paragraph grouping        (pure functions)
   media.py       PyAV probe, folder scan, output naming
   settings.py    JSON preferences + app data locations
@@ -16,10 +21,11 @@ src/transcriptor_prime/
 tools/
   make_icon.ps1        redraws the icon; run only when the artwork changes
   install_shortcuts.ps1 Start Menu + Desktop shortcuts for taskbar pinning
+  diarization_spike.py  times the speaker pass on this machine; not part of the app
 ```
 
-The dependency direction is one-way: `app` → `transcriber` → `formatting`/`settings`. Nothing below
-`app`/`widgets` imports Tk, and `formatting` imports nothing from the project at all, which is what
+The dependency direction is one-way: `app` → `transcriber` → `diarizer`/`attribution`/`formatting`/
+`settings`. Nothing below `app`/`speaker_dialog`/`widgets` imports Tk, and `formatting` imports nothing from the project at all, which is what
 makes the transcript rules testable in milliseconds without a model or a display.
 
 ## Why this stack
@@ -76,7 +82,10 @@ Progress events are throttled to one every 0.5 s. Whisper emits a segment every 
 queue and thrash the disk.
 
 **There is exactly one background thread.** Reading a queued file's duration would be the obvious
-second one, but see "Probing on the event loop" below — it is not, deliberately.
+second one, but see "Probing on the event loop" below — it is not, deliberately. Speaker
+identification is a second *process*, supervised from this same thread without adding another
+(see "Why a subprocess"). The one exception is the naming window's Play button, which decodes a
+few seconds of audio on a short-lived thread of its own.
 
 ### Cancellation
 
@@ -183,6 +192,182 @@ lands on a word.
 
 **A segment longer than the interval closes its own block.** No block is ever split mid-segment,
 because Whisper's segments are the smallest unit with a reliable timestamp.
+
+## Speaker identification
+
+Optional, off by default, and additive: with it off, no code path, Whisper argument or output byte
+differs from before it existed (`test_the_off_path_output_is_what_it_always_was`).
+
+```
+per file, on the worker thread:
+  diarizer.run()  ── spawns ──>  python -m transcriptor_prime.diarize_worker   (child process)
+     polls a spool file  <─────    decode → segment → embed → cluster → {"turns": [...]}
+  model.transcribe(word_timestamps=True)
+     per segment: attribution.split_segment() → ParagraphBuilder.add_run() → .part file
+```
+
+**sherpa-onnx, not pyannote.audio.** pyannote is the reference implementation, but it needs
+PyTorch (a 2 GB install against this app's 170 MB), a Hugging Face account, and a token pasted
+into the app. sherpa-onnx runs the *same* pyannote segmentation model plus a speaker-embedding
+model through ONNX: a 19 MB wheel, 33 MB of ungated models, CPU only. That matches everything
+under "Why this stack".
+
+**The voice model was chosen by measurement, after shipping the wrong one.** The embedding model
+decides whether two voices can be told apart at all; everything downstream only arranges its
+answer. The first choice, 3D-Speaker's CAM++, was the fastest candidate and passed a clean
+16-second studio sample — and on the first real recording, a radio interview between two men, it
+labelled one man's answer as a conversation. Seven candidates were then run on that interview,
+forced to two speakers, scored as the share of speech attributed to the right person:
+
+| Model | Correct | Size |
+|---|---|---|
+| **WeSpeaker ResNet34-LM** (in use) | 92% | 27 MB |
+| NeMo TitaNet large | 92% | 101 MB |
+| 3D-Speaker ERes2NetV2 (zh) | 92% | 71 MB, 3x slower |
+| 3D-Speaker ERes2Net | 80% | 26 MB |
+| NeMo TitaNet small | 80% | 40 MB |
+| WeSpeaker CAM++ | 76% | 29 MB |
+| 3D-Speaker CAM++ (first choice) | 69% | 30 MB |
+
+92% is the ceiling of a hand-made reference, not of the model: the resulting transcript has every
+turn in the right place and errs only on a few one-word replies at a change of speaker.
+ResNet34-LM is also what pyannote 3.1 itself pairs with this segmentation model. The lesson is
+recorded in `diarizer.py` beside the constant: test a voice model on a hard, real recording —
+similar voices, broadcast audio — before trusting it.
+
+**Counting speakers is the weak part, so the defaults lean on recoverable errors.** With the
+count on auto the engine clusters by a similarity threshold, and no threshold suits every
+recording: across five test files the value that gave the right count ranged from under 0.45 to
+0.7. At 0.5 the interview above comes out as 181 s, 40 s and **1.3 s** — two people and a scrap.
+So `attribution.absorb_minor_speakers` folds any voice with under 3 s of speech, or under 1.5% of
+it, into the nearest real speaker (auto only — a count the user typed is honoured). Beyond that
+the threshold errs toward one speaker too many, because an over-split is fixed in the naming
+window by giving two voices the same name, and two people fused into one cannot be fixed at all.
+
+Models come from `huggingface_hub.hf_hub_download` — already a dependency via faster-whisper —
+into the same `models` folder, at a **pinned revision**, so a given release of the app always
+fetches the same bytes. It is resumable, atomic and works offline once cached, exactly like the
+Whisper weights.
+
+### Why a subprocess
+
+The "Cancellation" section above judges a hard kill not worth a subprocess. For this engine the
+judgement reverses, for five independent reasons found by reading sherpa-onnx 1.13.8's source:
+
+1. **It holds the GIL.** `OfflineSpeakerDiarization.process` is bound without
+   `gil_scoped_release`. On a worker thread the Tk main thread cannot run for minutes and Windows
+   marks the window "Not Responding".
+2. **It cannot be cancelled.** The progress callback's documented "return non-zero to abort" is
+   ignored by the implementation.
+3. **It can end the process.** An internal error path calls `_Exit()`. In-process, that closes
+   the app with no message and no traceback.
+4. **It ships its own `onnxruntime.dll`**, the same base name as the one faster-whisper loads for
+   Silero VAD. Windows resolves loaded modules by base name, so whichever loads first serves both;
+   that works only while the two versions happen to be compatible.
+5. **It copies the audio**, doubling peak memory — memory the transcription then needs back.
+
+A child process answers all five: Cancel is `proc.kill()` and lands within a poll; a native exit
+or an out-of-memory becomes `DiarizationError` for that one file; no DLL is shared; and the
+child's memory is returned to the OS before Whisper decodes. `diarize_worker.py` is the only
+module that imports `sherpa_onnx`, and `test_the_app_never_loads_the_engine_in_process` keeps it
+that way.
+
+Details that matter:
+
+- **The child writes to a spool *file*, which the worker thread polls** every 0.2 s. A pipe would
+  need a reader thread (or risk a full-pipe deadlock); a file needs neither, so "exactly one
+  background thread" still holds. The spool doubles as the error report when the child dies.
+- The child is launched with the `python.exe` beside `pythonw.exe` (a `pythonw` child has no
+  usable stdout), with `CREATE_NO_WINDOW` so no console flashes, and with `PYTHONPATH` set
+  explicitly, since neither `run.bat`'s nor pytest's path setup is inherited.
+- A venv's `python.exe` is a launcher stub; the real interpreter is *its* child. Killing the stub
+  does take the interpreter with it; that was checked rather than assumed (no worker process
+  survives a cancel).
+- `_on_close` calls `diarizer.kill_active()`. The worker is a daemon thread and dies with the
+  window; a child process would not, and would burn CPU for minutes unobserved.
+- `window_shift_for()` coarsens the analysis step on recordings over an hour. The clustering
+  cost grows with the square of the length; the values are measured, and recorded in its
+  docstring. `tools/diarization_spike.py` reproduces them.
+
+### Failure policy
+
+If the engine cannot be *prepared* — no network for the first download, a broken install — the
+queue stops before the first file, with a message naming the checkbox to untick. The alternative
+is an overnight queue that quietly produces unlabelled transcripts. A `--selftest` child run is
+what proves the install, including that `sherpa-onnx-core`'s own `onnxruntime.dll` is present
+(without it Windows binds the engine to an old copy in System32).
+
+If the pass fails for *one file*, that file is transcribed without labels, the log says why, and
+the queue continues. Losing labels is never allowed to cost a transcript.
+
+### Who said each word
+
+The engine reports *turns* ("cluster 4, 9.3–14.6 s"); Whisper reports segments. `attribution.py`
+lines them up one segment at a time, which keeps the transcript streaming to disk:
+
+- Whisper is asked for `word_timestamps` — only when there are turns to use them, since it costs
+  time. Each word goes to the speaker with the most overlap; a tie goes to whoever was already
+  talking; a word in a gap takes the nearest turn, or inherits the previous speaker if that turn
+  is over a second away. A segment is split wherever the speaker changes between words.
+- Two small repairs, both *within* a segment: a lone short first/last word that disagrees with
+  the rest is snapped to it (timestamp jitter at a turn boundary), and a tiny `A b A` flip is
+  folded back into `A`. Nothing looks across segments, because Whisper gives a genuine
+  interjection ("Right.") a segment of its own, and those must survive.
+- Overlapped speech produces overlapping turns, so the lookup cannot be "the last turn that
+  started before t". `Timeline` keeps a running maximum of turn ends to know when a backwards scan
+  may stop.
+- Raw cluster ids are arbitrary and non-contiguous. `SpeakerNamer` numbers speakers by first
+  appearance, so "Speaker 1" is whoever opens the recording.
+
+`ParagraphBuilder.add_run` closes a block on a change of speaker as well as on the interval, so
+no paragraph mixes two voices. The header is written before anyone has spoken, so it lists one
+label per cluster and `speakers.sync_header` trues it up at the end if a cluster (a door slam)
+never had a word attributed to it.
+
+### Progress in two phases
+
+The speaker pass emits `Progress(phase="speakers")`. The file bar runs 0–100% for it, then again
+for transcription; folding both into one bar would need a guess at their relative cost, which
+varies several-fold with the model chosen. The queue bar counts only transcribed audio and holds
+still during the pass. The per-file ETA is timed from when transcription began (`rate_started`),
+so a five-minute speaker pass does not inflate it; the displayed *elapsed* still counts from the
+start of the file. The engine's first phase reports nothing, so the poll loop ticks the callback
+regardless and the elapsed clock keeps moving.
+
+### Names live in the transcript
+
+There is no sidecar file. `speakers.py` reads the current names, sample quotes and playable
+timestamps back out of the `.txt`'s own label lines, so a transcript can be named, renamed,
+moved between machines and renamed again.
+
+- A label line is `[HH:MM:SS] Name:` **preceded by a blank line**. Wrapped body text never follows
+  a blank line, so it cannot be mistaken for one, whatever it says. The label line itself is
+  never wrapped.
+- Renaming is an exact-string lookup of the captured label against a `{current: new}` mapping —
+  no regex is ever built from a name, and because lookups are against the *original* labels, two
+  names can be swapped in one pass. The same name twice merges two speakers.
+- The header's `Speakers:` line is regenerated, never parsed, so a comma in a name is harmless.
+- Line endings and a BOM are preserved per line (the file may have been through Notepad), and the
+  rewrite is atomic: temp file, `fsync`, `os.replace`.
+
+### The naming window
+
+`speaker_dialog.py` is the app's first `CTkToplevel`. Notes for whoever writes the second:
+
+- `_apply_icon` must be called **in the constructor**. `CTkToplevel` swaps in its own icon 200 ms
+  after creation unless `iconbitmap` has been called by then.
+- `grab_set` is deferred and retried: `CTkToplevel` withdraws and re-shows itself while colouring
+  its title bar, and a grab on a window that is not viewable raises.
+- `geometry()` scales the size but not the position, so size goes in unscaled units and the
+  offset in device pixels. It is clamped to `widgets.work_area`, like the main window.
+- **Play sample** is the one other thread in the app: short-lived, started per click, it runs
+  only `media.decode_clip` (a PyAV seek, not a decode from the top) and hands a WAV path back
+  through a queue the dialog polls. It touches no widget. `winsound` cannot play from memory
+  asynchronously, hence the temp file; every Play and Stop bumps a request counter so a decode
+  that finishes late is recognisably stale.
+- The options row that turns the feature on made the main window one row taller. The queue list
+  is one row shorter to pay for it, so that at the 130% Text size on a 1504-px-tall display at
+  150% scaling the log pane keeps the height it had (measured: 93 px, was 98).
 
 ## Failure handling
 
@@ -314,6 +499,18 @@ enforces this.
 - `test_media.py` — probes real MP3 and MP4 files that `conftest.py` synthesizes with PyAV, plus the
   folder scan and the output-name reservation.
 - `test_settings.py` — round-trip, corruption, clamping, unknown keys from a future version.
+- `test_attribution.py` — word-to-speaker rules on hand-written numbers: overlap, ties, gaps,
+  overlapping turns, edge snapping, flip smoothing, and the interjection that must survive.
+- `test_speakers.py` — parsing and renaming on plain text files: swap, merge, re-rename, names
+  full of punctuation, body text shaped like a label, CRLF/BOM preservation, and that a failed
+  `os.replace` leaves the original intact and no temp file behind.
+- `test_diarizer.py` — the process boundary, with `python -c` one-liners standing in for the
+  engine: protocol parsing, progress, a cancel that kills within a poll, and every way a child
+  can die (reported error, silent `os._exit`, garbage output). One `slow` test runs the real
+  engine.
+- `test_speaker_dialog.py` — the option, the button's three-way choice of target, auto-open for
+  a single file only, and the naming window itself with `winsound` faked. The dialog is always
+  built non-modal there: a real grab would seize the keyboard of whoever runs the tests.
 - `test_transcriber.py` — a `FakeModel` stands in for `WhisperModel`, so incremental writing,
   atomic rename, cancellation, progress monotonicity and error mapping are all verified without
   downloading weights. `TestBatch` pins the batch contract: the model is constructed exactly once

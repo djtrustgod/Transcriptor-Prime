@@ -1,6 +1,6 @@
 <img src="src/transcriptor_prime/assets/logo.png" alt="" width="88" align="right">
 
-# Transcriptor Prime 1.0.0
+# Transcriptor Prime 2.0.0
 
 A desktop app that turns audio or video recordings into plain-text transcripts with periodic
 timecodes. Everything runs **locally** — no cloud service, no API key, and nothing about your
@@ -15,7 +15,7 @@ run. Queue a folder of them and leave it running.
 Double-click **`run.bat`**.
 
 The first launch sets up a private Python environment and downloads the dependencies (about
-150 MB); it takes a few minutes. Every launch after that opens the app immediately.
+170 MB); it takes a few minutes. Every launch after that opens the app immediately.
 
 Then:
 
@@ -27,6 +27,9 @@ Then:
 
 The first transcription with a given model downloads that model's weights (~250 MB for `small`).
 That happens once; afterwards the app works fully offline.
+
+To have the transcript say **who is talking**, tick *Identify speakers* first — see
+[Identifying speakers](#identifying-speakers).
 
 ### Add it to the taskbar
 
@@ -107,7 +110,7 @@ Duration:   00:00:31
 Model:      small (int8, CPU)
 Language:   en (detected, 0.99)
 Generated:  2026-08-02 15:28
-Created by: Transcriptor Prime 1.0.0
+Created by: Transcriptor Prime 2.0.0
 
 ------------------------------------------------------------
 
@@ -125,6 +128,82 @@ All right, let us talk about what is planned for the next three months.
 ```
 
 Set **Wrap at** to `0` if you would rather each paragraph stayed on one long line.
+
+## Identifying speakers
+
+Tick **Identify speakers (who said what)** in Options and the transcript says who is talking. A
+new paragraph starts whenever the speaker changes, and a long answer still gets a timecode every
+interval, with the name repeated:
+
+```
+Transcript: interview.mp3
+Duration:   00:42:10
+Model:      small (int8, CPU)
+Language:   en (detected, 0.99)
+Speakers:   Interviewer, Jane Doe
+Generated:  2026-09-19 10:30
+Created by: Transcriptor Prime 2.0.0
+
+------------------------------------------------------------
+
+[00:00:00] Interviewer:
+So tell me how you got started in the business.
+
+[00:00:07] Jane Doe:
+Well, it was back in 1998 when I first walked into the shop and asked if they needed anyone on
+Saturdays.
+
+[00:00:37] Jane Doe:
+And that is how the second location opened.
+```
+
+The app can tell voices apart but cannot know whose they are, so a fresh transcript says
+`Speaker 1`, `Speaker 2`… numbered in the order people first speak. Putting names to them is the
+next step:
+
+### Naming the speakers
+
+Press **Name speakers…**. The window lists each voice with a few things it said and a
+**Play sample** button that plays a few seconds of that voice from the recording. Type a name
+beside each and press **Apply names** — the `.txt` is rewritten in place.
+
+- After a **single file** finishes, the window opens by itself. A **queue** never interrupts:
+  when it is done, select a finished row and press **Name speakers…** for each file.
+- With nothing selected and no recent run, the button asks for a transcript — so one from last
+  week, or from another machine, can be named too. Names live only in the `.txt`; there is no
+  second file to keep with it.
+- It can be reopened any time to correct a name. Leave a box as it is to keep that label.
+- Giving two voices the **same name merges them** into one speaker. That is the fix when one
+  person has been split in two — and it cannot be undone, short of transcribing again.
+- **Play sample** needs the original recording. It is found automatically while the file is
+  still in the queue, or when it sits beside the transcript under its original name.
+
+### Getting the best result
+
+- **Set "Speakers" when you know the number** — 2 for a one-on-one interview. Left at `0` the app
+  works the number out for itself, which is the part it is most likely to get wrong. Telling it
+  removes that guess. On auto, a "speaker" amounting to only a second or two of sound is folded
+  into whoever was talking around it, so a cough does not become a third person.
+- It works best on clear recordings with one person talking at a time. Heavy crosstalk, a very
+  short interjection, or two similar voices on one poor microphone will produce some mislabelled
+  lines. Fix those by hand in the `.txt`; the naming window only changes names.
+- The voice models are trained on English speech. Other languages work, less reliably.
+
+### What it costs
+
+Identifying speakers is a separate pass over each recording, *before* transcription starts. The
+file's progress bar runs through once for it ("Identifying speakers") and then again for the
+transcription; the overall bar for a queue waits during the speaker pass. The first stretch of
+the pass reports no percentage — that is normal, not a hang — and **Cancel** works throughout.
+
+Measured on the development machine (8 threads): about **3½ minutes for a 30-minute recording**,
+and about **8 minutes for a 3-hour one** (long recordings are analysed at a coarser step). It
+needs memory in proportion to length — roughly **2 GB free for a 3-hour recording**. If a file
+is too much for the machine, that file is transcribed without speaker labels and the log says
+so; nothing is lost.
+
+The first use downloads two small models (about 33 MB) into the same `models` folder as the
+Whisper weights. After that it works offline, like everything else.
 
 ## Long recordings
 
@@ -169,7 +248,7 @@ A single queued file behaves exactly as it always has, **Save to** box and all.
 
 | What | Where |
 |---|---|
-| Model weights | `%LOCALAPPDATA%\TranscriptorPrime\models` |
+| Model weights (Whisper, and the two speaker models) | `%LOCALAPPDATA%\TranscriptorPrime\models` |
 | Preferences | `%LOCALAPPDATA%\TranscriptorPrime\settings.json` |
 | Python environment | `.venv\` in this folder |
 | Start Menu shortcut | `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Transcriptor Prime\` |
@@ -206,6 +285,25 @@ The first use of each model size needs internet. Once downloaded it is cached pe
 upgrade that adds one heals itself. If it still will not start, delete the `.venv` folder and run
 it again to rebuild the environment from scratch.
 
+**"Speaker identification could not be set up."**
+The first use needs internet to fetch the two speaker models (about 33 MB) from Hugging Face.
+For a machine that cannot reach it, run one speaker-labelled transcription on a machine that
+can, and copy its `%LOCALAPPDATA%\TranscriptorPrime\models` folder across. If the message
+mentions `sherpa-onnx-core`, delete the `.venv` folder and run `run.bat` again. Or untick
+*Identify speakers* and transcribe without it.
+
+**Too many speakers, or too few.**
+Set **Speakers** in Options to the real number and transcribe again. If one person still comes
+out as two, give both the same name in **Name speakers…** to merge them.
+
+**"Speaker identification failed … transcribing without speaker labels."**
+That one file was too much for the speaker pass — usually memory, on a very long recording. The
+transcript is complete, just unlabelled. Close other programs and try that file again by itself.
+
+**Play sample is greyed out.**
+The naming window could not find the recording. Put it back beside the transcript under the
+name shown in the transcript's `Transcript:` line, then reopen the window.
+
 **The transcript repeats the same sentence over and over.**
 Uncheck *Use preceding text for context* and re-run.
 
@@ -234,13 +332,23 @@ pin again from the Start Menu.
 The running version appears in the window title and the first line of the log. Every transcript
 also records it in its `Created by:` header line.
 
-This is **1.0.0**. The transcript format and the option set are settled; changes to either from
-here will be additive, and anything that is not will get a major version. See
+This is **2.0.0**, which adds speaker identification and the *Name speakers…* window. A
+transcript made without speaker identification is byte-for-byte what 1.0.0 produced. Changes to
+the transcript format or the option set from here will be additive, and anything that is not
+will get a major version. See
 [CHANGELOG.md](CHANGELOG.md).
 
 ## Not included
 
-Speaker labels ("who said what"), drag-and-drop, and subtitle (`.srt`) export.
+Drag-and-drop, and subtitle (`.srt`) export.
+
+## Credits
+
+Speaker identification runs on [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx)
+(Apache-2.0) with two models the app downloads on first use: the
+[pyannote segmentation 3.0](https://huggingface.co/pyannote/segmentation-3.0) model (MIT) and
+the [WeSpeaker](https://github.com/wenet-e2e/wespeaker) ResNet34-LM speaker-embedding model,
+trained on VoxCeleb (CC BY 4.0). Transcription is [faster-whisper](https://github.com/SYSTRAN/faster-whisper).
 
 ## Design notes
 

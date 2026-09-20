@@ -105,3 +105,20 @@ def test_save_failure_does_not_raise(monkeypatch, tmp_path: Path):
         Path, "mkdir", lambda *a, **k: (_ for _ in ()).throw(OSError("denied"))
     )
     settings_mod.save(Settings())  # must not raise
+
+
+class TestSpeakerSettings:
+    def test_speaker_identification_is_off_until_asked_for(self):
+        fresh = Settings()
+        assert fresh.identify_speakers is False
+        assert fresh.num_speakers == 0
+
+    def test_the_speaker_count_is_clamped(self):
+        assert Settings(num_speakers=99).sanitized().num_speakers == 10
+        assert Settings(num_speakers=-3).sanitized().num_speakers == 0
+
+    def test_the_choice_round_trips(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+        settings_mod.save(Settings(identify_speakers=True, num_speakers=3))
+        loaded = settings_mod.load()
+        assert (loaded.identify_speakers, loaded.num_speakers) == (True, 3)

@@ -15,7 +15,9 @@ from pathlib import Path
 
 import pytest
 
-from transcriptor_prime import transcriber
+from transcriptor_prime import diarizer, transcriber
+from transcriptor_prime.attribution import Turn
+from transcriptor_prime.formatting import RULE
 from transcriptor_prime.transcriber import (
     CANCELLED,
     COMPLETED,
@@ -32,10 +34,18 @@ from transcriptor_prime.transcriber import (
 
 
 @dataclass
+class FakeWord:
+    start: float
+    end: float
+    word: str  # carries its own leading space, as Whisper's do
+
+
+@dataclass
 class FakeSegment:
     start: float
     end: float
     text: str
+    words: list[FakeWord] | None = None  # only with word_timestamps=True
 
 
 @dataclass
@@ -552,6 +562,302 @@ class TestBatchProgress:
 
         assert all(p.file_count == 1 and p.batch_total == 0.0 for p in progress)
         assert progress[-1].batch_fraction == pytest.approx(1.0)
+
+
+class FakeDiarizer:
+    """Stands in for the speaker engine's process boundary."""
+
+    def __init__(self, turns=(), error=None, on_run=None):
+        self.turns = list(turns)
+        self.error = error
+        self.on_run = on_run
+        self.calls: list[dict] = []
+
+    def run(self, source, *, num_speakers, threads, duration, cancel, on_progress):
+        self.calls.append(
+            dict(source=Path(source).name, num_speakers=num_speakers, threads=threads)
+        )
+        on_progress(0, 0)
+        on_progress(5, 10)
+        if self.on_run:
+            self.on_run(cancel)
+        if cancel.is_set():
+            raise diarizer.Cancelled()
+        if self.error:
+            raise self.error
+        return list(self.turns)
+
+
+@pytest.fixture
+def install_diarizer(monkeypatch):
+    holder: dict = {"prepared": 0}
+
+    def install(turns=(), error=None, on_run=None, prepare_error=None):
+        instance = FakeDiarizer(turns, error, on_run)
+        holder["diarizer"] = instance
+
+        def prepare(emit_status):
+            holder["prepared"] += 1
+            if prepare_error:
+                raise prepare_error
+            emit_status("Speaker identification ready.")
+            return instance
+
+        monkeypatch.setattr(diarizer, "prepare", prepare)
+        # Progress is throttled by wall clock; the fake reports instantly.
+        monkeypatch.setattr(transcriber, "_UPDATE_INTERVAL", 0.0)
+        return holder
+
+    return install
+
+
+def spoken(start: float, *texts: str, step: float = 1.0) -> FakeSegment:
+    """A segment with one evenly spaced word per entry in ``texts``."""
+    words = [
+        FakeWord(start + i * step, start + (i + 1) * step, f" {text}")
+        for i, text in enumerate(texts)
+    ]
+    return FakeSegment(start, start + len(texts) * step, " " + " ".join(texts), words)
+
+
+# Raw ids are deliberately out of order and non-contiguous, as the engine's are.
+INTERVIEW_TURNS = [Turn(0.0, 4.0, 7), Turn(4.0, 40.0, 2), Turn(40.0, 44.0, 7)]
+INTERVIEW = [
+    spoken(0.0, "How", "did", "it", "start?"),
+    spoken(4.0, "Well,", "back", "in", "1998."),
+    spoken(8.0, *["word"] * 31),  # a long answer, past the 30s interval
+    spoken(40.0, "I", "see."),
+]
+
+
+class TestSpeakerIdentification:
+    def test_the_transcript_names_who_said_what(self, tmp_path, install_model, install_diarizer):
+        install_model(INTERVIEW, duration=44.0)
+        install_diarizer(INTERVIEW_TURNS)
+        job = make_job(tmp_path, identify_speakers=True, duration=44.0)
+
+        run(job)
+
+        text = job.output.read_text(encoding="utf-8")
+        body = text.split(RULE, 1)[1]
+        assert "[00:00:00] Speaker 1:\nHow did it start?\n" in body
+        assert "[00:00:04] Speaker 2:\nWell, back in 1998. word" in body
+        assert "[00:00:40] Speaker 1:\nI see.\n" in body
+        assert "Speakers:   Speaker 1, Speaker 2\n" in text
+
+    def test_speakers_are_numbered_by_who_talks_first(self, tmp_path, install_model, install_diarizer):
+        install_model(INTERVIEW, duration=44.0)
+        install_diarizer(INTERVIEW_TURNS)  # raw id 7 opens, so 7 is "Speaker 1"
+        job = make_job(tmp_path, identify_speakers=True)
+        run(job)
+        first_label = job.output.read_text("utf-8").split(RULE, 1)[1].split("\n")[2]
+        assert first_label == "[00:00:00] Speaker 1:"
+
+    def test_a_segment_is_split_where_the_voice_changes(self, tmp_path, install_model, install_diarizer):
+        install_model([spoken(0.0, "Ready?", "Yes,", "I", "am.")], duration=4.0)
+        install_diarizer([Turn(0.0, 1.0, 0), Turn(1.0, 4.0, 1)])
+        # A stated count: on auto, one second of a voice would be absorbed as a scrap.
+        job = make_job(tmp_path, identify_speakers=True, num_speakers=2)
+        run(job)
+        body = job.output.read_text("utf-8").split(RULE, 1)[1]
+        assert "[00:00:00] Speaker 1:\nReady?\n\n[00:00:01] Speaker 2:\nYes, I am.\n" in body
+
+    def test_a_long_answer_repeats_the_name_each_interval(self, tmp_path, install_model, install_diarizer):
+        answer = [spoken(4.0 + 10 * n, *["word"] * 10) for n in range(7)]
+        install_model([spoken(0.0, "How", "did", "it", "start?"), *answer], duration=74.0)
+        install_diarizer([Turn(0.0, 4.0, 0), Turn(4.0, 74.0, 1)])
+        job = make_job(tmp_path, identify_speakers=True)
+        run(job)
+        labels = [
+            line for line in job.output.read_text("utf-8").splitlines()
+            if line.startswith("[") and line.endswith(":")
+        ]
+        assert labels == [
+            "[00:00:00] Speaker 1:",
+            "[00:00:04] Speaker 2:",
+            "[00:00:34] Speaker 2:",
+            "[00:01:04] Speaker 2:",
+        ]
+
+    def test_word_timestamps_are_requested_only_with_speakers(self, tmp_path, install_model, install_diarizer):
+        holder = install_model(INTERVIEW, duration=44.0)
+        install_diarizer(INTERVIEW_TURNS)
+        run(make_job(tmp_path, identify_speakers=True))
+        assert holder["model"].transcribe_kwargs["word_timestamps"] is True
+
+    def test_the_off_path_never_touches_the_engine(self, tmp_path, install_model, install_diarizer):
+        holder = install_model(SEGMENTS, duration=95.0)
+        diar = install_diarizer(INTERVIEW_TURNS)
+        job = make_job(tmp_path)
+        run(job)
+        assert diar["prepared"] == 0
+        assert "word_timestamps" not in holder["model"].transcribe_kwargs
+        text = job.output.read_text("utf-8")
+        assert "Speaker" not in text
+
+    def test_the_off_path_output_is_what_it_always_was(self, tmp_path, install_model):
+        install_model(SEGMENTS, duration=95.0)
+        job = make_job(tmp_path)
+        run(job)
+        body = job.output.read_text("utf-8").split(RULE + "\n", 1)[1]
+        assert body == (
+            "\n"
+            "[00:00:00]\n"
+            "First half of the opening paragraph. Second half of the opening paragraph.\n"
+            "\n"
+            "[00:00:31]\n"
+            "The middle section begins here. And it continues for a while.\n"
+            "\n"
+            "[00:01:10]\n"
+            "A final thought to close on.\n"
+            "\n"
+        )
+
+    def test_the_speaker_count_and_threads_reach_the_engine(self, tmp_path, install_model, install_diarizer):
+        install_model(INTERVIEW, duration=44.0)
+        diar = install_diarizer(INTERVIEW_TURNS)
+        run(make_job(tmp_path, identify_speakers=True, num_speakers=2, cpu_threads=6))
+        assert diar["diarizer"].calls == [
+            dict(source="recording.mp3", num_speakers=2, threads=6)
+        ]
+
+    def test_a_failed_pass_still_produces_a_plain_transcript(self, tmp_path, install_model, install_diarizer):
+        holder = install_model(SEGMENTS, duration=95.0)
+        install_diarizer(error=diarizer.DiarizationError("ran out of memory"))
+        job = make_job(tmp_path, identify_speakers=True)
+
+        events = run(job)
+
+        assert any(isinstance(e, Done) and not e.partial for e in events)
+        assert "word_timestamps" not in holder["model"].transcribe_kwargs
+        assert "Speaker" not in job.output.read_text("utf-8")
+        messages = [e.message for e in events if isinstance(e, Status)]
+        assert any(
+            "ran out of memory" in m and "without speaker labels" in m for m in messages
+        )
+
+    def test_no_speech_means_no_labels(self, tmp_path, install_model, install_diarizer):
+        install_model(SEGMENTS, duration=95.0)
+        install_diarizer(turns=[])
+        job = make_job(tmp_path, identify_speakers=True)
+        run(job)
+        assert "Speakers:" not in job.output.read_text("utf-8")
+
+    def test_the_header_drops_a_voice_that_never_got_a_word(self, tmp_path, install_model, install_diarizer):
+        install_model([spoken(0.0, "Just", "me", "talking.")], duration=3.0)
+        install_diarizer([Turn(0.0, 3.0, 0), Turn(50.0, 50.4, 1)])  # 1 is a door slam
+        job = make_job(tmp_path, identify_speakers=True)
+        run(job)
+        text = job.output.read_text("utf-8")
+        assert "Speakers:   Speaker 1\n" in text
+        assert not list(tmp_path.glob("*.tmp"))
+
+    def test_the_speaker_pass_reports_its_own_progress_phase(self, tmp_path, install_model, install_diarizer):
+        install_model(INTERVIEW, duration=44.0)
+        install_diarizer(INTERVIEW_TURNS)
+        events = run(make_job(tmp_path, identify_speakers=True, duration=44.0))
+
+        phases = [e.phase for e in events if isinstance(e, Progress)]
+        assert phases[0] == "speakers" and phases[-1] == "transcribe"
+        assert phases == sorted(phases)  # every "speakers" before any "transcribe"
+        halfway = next(
+            e for e in events if isinstance(e, Progress) and e.audio_done > 0
+        )
+        assert halfway.fraction == pytest.approx(0.5)
+        assert halfway.eta is None
+
+    def test_cancel_during_the_speaker_pass_writes_nothing(self, tmp_path, install_model, install_diarizer):
+        install_model(INTERVIEW, duration=44.0)
+        install_diarizer(INTERVIEW_TURNS, on_run=lambda cancel: cancel.set())
+        jobs = make_jobs(tmp_path, ["a.mp3", "b.mp3"], identify_speakers=True)
+
+        events = run_batch(jobs)
+
+        (finished,) = only(events, FileFinished)
+        assert (finished.status, finished.output) == (CANCELLED, None)
+        (end,) = only(events, BatchFinished)
+        assert (end.cancelled, end.skipped) == (1, 1)
+        assert list(tmp_path.glob("*.txt*")) == []
+
+    def test_a_cancelled_transcript_keeps_its_labels(self, tmp_path, install_model, install_diarizer):
+        cancel = threading.Event()
+        install_model(
+            INTERVIEW, duration=44.0,
+            on_segment=lambda index: cancel.set() if index == 2 else None,
+        )
+        install_diarizer(INTERVIEW_TURNS)
+        job = make_job(tmp_path, identify_speakers=True)
+
+        run(job, cancel)
+
+        partial = tmp_path / "recording.partial.txt"
+        text = partial.read_text("utf-8")
+        assert "[00:00:04] Speaker 2:\nWell, back in 1998.\n" in text
+        assert "Speakers:   Speaker 1, Speaker 2\n" in text
+
+    def test_the_engine_is_prepared_once_for_a_whole_queue(self, tmp_path, install_model, install_diarizer):
+        install_model(INTERVIEW, duration=44.0)
+        diar = install_diarizer(INTERVIEW_TURNS)
+        jobs = make_jobs(tmp_path, ["a.mp3", "b.mp3", "c.mp3"], identify_speakers=True)
+
+        events = run_batch(jobs)
+
+        assert diar["prepared"] == 1
+        assert len(diar["diarizer"].calls) == 3
+        assert [e.speakers for e in only(events, FileFinished)] == [2, 2, 2]
+
+    def test_file_finished_reports_zero_speakers_when_unlabelled(self, tmp_path, install_model, install_diarizer):
+        install_model(SEGMENTS, duration=95.0)
+        install_diarizer(error=diarizer.DiarizationError("nope"))
+        events = run_batch(make_jobs(tmp_path, ["a.mp3"], identify_speakers=True))
+        assert [e.speakers for e in only(events, FileFinished)] == [0]
+
+    def test_an_engine_that_cannot_start_stops_the_queue_up_front(self, tmp_path, install_model, install_diarizer):
+        holder = install_model(SEGMENTS, duration=95.0)
+        install_diarizer(prepare_error=OSError("Failed to resolve 'huggingface.co'"))
+        jobs = make_jobs(tmp_path, ["a.mp3", "b.mp3"], identify_speakers=True)
+
+        events = run_batch(jobs)
+
+        (end,) = only(events, BatchFinished)
+        assert end.skipped == 2 and end.completed == 0
+        assert "Speaker identification could not be set up" in end.message
+        assert "Untick 'Identify speakers'" in end.message
+        assert only(events, FileStarted) == []
+        assert list(tmp_path.glob("*.txt")) == []
+
+    def test_on_auto_a_scrap_of_a_third_speaker_is_absorbed(self, tmp_path, install_model, install_diarizer):
+        install_model(INTERVIEW, duration=44.0)
+        install_diarizer([*INTERVIEW_TURNS, Turn(20.0, 20.8, 5)])  # 0.8s of "someone"
+        job = make_job(tmp_path, identify_speakers=True, num_speakers=0)
+
+        events = run(job)
+
+        assert "Speakers:   Speaker 1, Speaker 2\n" in job.output.read_text("utf-8")
+        assert any(isinstance(e, Status) and e.message == "Found 2 speakers." for e in events)
+
+    def test_a_speaker_count_the_user_gave_is_honoured(self, tmp_path, install_model, install_diarizer):
+        install_model([*INTERVIEW[:2], spoken(20.0, "Sorry?"), INTERVIEW[3]], duration=44.0)
+        install_diarizer([Turn(0.0, 4.0, 7), Turn(4.0, 20.0, 2), Turn(20.0, 20.8, 5), Turn(40.0, 44.0, 7)])
+        job = make_job(tmp_path, identify_speakers=True, num_speakers=3)
+
+        run(job)
+
+        text = job.output.read_text("utf-8")
+        assert "[00:00:20] Speaker 3:\nSorry?\n" in text
+
+    def test_the_queue_bar_holds_still_during_the_speaker_pass(self, tmp_path, install_model, install_diarizer):
+        install_model(INTERVIEW, duration=44.0)
+        install_diarizer(INTERVIEW_TURNS)
+        jobs = make_jobs(tmp_path, ["a.mp3", "b.mp3"], identify_speakers=True, duration=44.0)
+
+        events = run_batch(jobs)
+
+        second_file = [
+            e for e in only(events, Progress)
+            if e.file_index == 1 and e.phase == "speakers"
+        ]
+        assert second_file and {e.batch_done for e in second_file} == {44.0}
 
 
 @pytest.mark.slow

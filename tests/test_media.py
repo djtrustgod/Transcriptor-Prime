@@ -134,3 +134,40 @@ class TestSameFileKey:
         target.write_bytes(b"x")
         monkeypatch.chdir(tmp_path)
         assert media.same_file_key(Path("clip.mp3")) == media.same_file_key(target)
+
+
+class TestDecodeClip:
+    """Voice samples for the "Name speakers" window."""
+
+    @pytest.mark.parametrize("fixture", ["tone_mp3", "tone_mp4"])
+    def test_a_clip_is_the_requested_length(self, fixture, request):
+        source = request.getfixturevalue(fixture)
+        pcm = media.decode_clip(source, start=0.0, duration=1.0, rate=22050)
+        assert len(pcm) == 22050 * 2
+        assert any(pcm)  # a tone, not silence
+
+    @pytest.mark.parametrize("fixture", ["tone_mp3", "tone_mp4"])
+    def test_a_clip_can_start_partway_in(self, fixture, request):
+        source = request.getfixturevalue(fixture)
+        pcm = media.decode_clip(source, start=1.5, duration=1.0, rate=22050)
+        assert len(pcm) == 22050 * 2
+
+    def test_a_clip_running_off_the_end_is_just_shorter(self, tone_mp3: Path):
+        pcm = media.decode_clip(tone_mp3, start=2.5, duration=5.0, rate=22050)
+        assert 0 < len(pcm) < 22050 * 2
+
+    def test_an_unreadable_file_raises_media_error(self, tmp_path: Path):
+        bogus = tmp_path / "notes.mp3"
+        bogus.write_text("not audio")
+        with pytest.raises(media.MediaError):
+            media.decode_clip(bogus, 0, 1)
+
+    def test_write_wav_round_trips(self, tone_mp3: Path, tmp_path: Path):
+        import wave
+
+        pcm = media.decode_clip(tone_mp3, 0.0, 0.5)
+        target = tmp_path / "clip.wav"
+        media.write_wav(target, pcm)
+        with wave.open(str(target), "rb") as wav:
+            assert (wav.getnchannels(), wav.getsampwidth(), wav.getframerate()) == (1, 2, 22050)
+            assert wav.getnframes() == len(pcm) // 2

@@ -1,6 +1,6 @@
 """Widgets and theming that CustomTkinter does not ship.
 
-Three things live here, all of them Tk code:
+Four things live here, all of them Tk code:
 
 * :func:`style_queue_tree` — the ttk-to-CustomTkinter colour bridge. The file
   queue is a ``ttk.Treeview`` because CustomTkinter has no table widget, so it
@@ -10,13 +10,16 @@ Three things live here, all of them Tk code:
   three.
 * :data:`STATUS_COLORS` — the queue's per-status row colours, in light/dark
   pairs.
+* :func:`work_area` — how much desktop a window may occupy, which both the
+  main window and the "Name speakers" window clamp themselves to.
 
-``app.py`` is the window; this module is the parts it is built from. Nothing
-below these two files imports Tk.
+``app.py`` is the window; this module is the parts it is built from. Apart
+from ``speaker_dialog.py``, nothing else in the package imports Tk.
 """
 
 from __future__ import annotations
 
+import sys
 import tkinter as tk
 from tkinter import ttk
 from typing import Sequence
@@ -162,6 +165,24 @@ def style_queue_tree(tree: ttk.Treeview, _mode: str | None = None) -> None:
     # switch or finished rows keep their light-mode green on a dark background.
     for tag, pair in STATUS_COLORS.items():
         tree.tag_configure(tag, foreground=pick(pair))
+
+
+def work_area(window: tk.Misc) -> tuple[int, int]:
+    """The desktop area a window can actually occupy, taskbar excluded."""
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            rect = wintypes.RECT()
+            SPI_GETWORKAREA = 0x0030
+            if ctypes.windll.user32.SystemParametersInfoW(
+                SPI_GETWORKAREA, 0, ctypes.byref(rect), 0
+            ):
+                return rect.right - rect.left, rect.bottom - rect.top
+        except Exception:
+            pass
+    return window.winfo_screenwidth(), window.winfo_screenheight()
 
 
 class CTkSpinbox(ctk.CTkFrame):

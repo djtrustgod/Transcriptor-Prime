@@ -1,6 +1,6 @@
 [project]
 name = "transcriptor-prime"
-version = "1.0.0"
+version = "2.0.0"
 description = "Local audio/video transcription GUI with periodic timecodes"
 requires-python = ">=3.10"
 
@@ -8,5 +8,5 @@ requires-python = ">=3.10"
 pythonpath = ["src"]
 testpaths = ["tests"]
 markers = [
-    "slow: runs a real Whisper model; downloads weights on first use",
+    "slow: runs a real Whisper or speaker model; downloads weights on first use",
 ]

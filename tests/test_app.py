@@ -40,42 +40,6 @@ from transcriptor_prime.transcriber import (  # noqa: E402
 )
 
 
-@pytest.fixture(scope="session")
-def tk_root():
-    """One Tk interpreter for the whole session.
-
-    Creating a fresh root per test churned through 35 interpreters and turned
-    out to fail intermittently. Just as importantly, deciding "is there a
-    display?" once means an unexpected TclError inside a test is reported as a
-    failure instead of being swallowed as a skip.
-
-    It is a ``ctk.CTk`` rather than a ``tk.Tk`` because CustomTkinter's scaling
-    and appearance trackers walk up ``.master`` looking for the root window and
-    register their polling loop against it.
-    """
-    try:
-        root = ctk.CTk()
-    except tk.TclError as exc:  # pragma: no cover - headless environment
-        pytest.skip(f"no display available: {exc}")
-    root.withdraw()
-    yield root
-    root.destroy()
-
-
-@pytest.fixture
-def app(tk_root, tmp_path, monkeypatch):
-    """A fresh app on its own Toplevel, so tests cannot leak state into each other."""
-    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
-    window = ctk.CTkToplevel(tk_root)
-    window.withdraw()
-    instance = TranscriptorApp(window)
-    window.update()
-    yield instance
-    if instance._appearance_callback is not None:
-        ctk.AppearanceModeTracker.remove(instance._appearance_callback)
-    window.destroy()
-
-
 class TestLabelRoundTrips:
     @pytest.mark.parametrize("model", MODEL_SIZES)
     def test_model_label_round_trip(self, model):
@@ -251,16 +215,6 @@ class TestEventHandling:
     def test_status_messages_reach_the_log(self, app):
         app._handle(Status("Detected language: en"))
         assert "Detected language: en" in app.log.get("1.0", "end")
-
-
-@pytest.fixture
-def two_clips(tmp_path, tone_mp3, tone_mp4):
-    """The synthesized tones copied into one folder, so a queue has real media."""
-    first = tmp_path / "alpha.mp3"
-    second = tmp_path / "beta.mp4"
-    first.write_bytes(tone_mp3.read_bytes())
-    second.write_bytes(tone_mp4.read_bytes())
-    return [first, second]
 
 
 class TestQueue:

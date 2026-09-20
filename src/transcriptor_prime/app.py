@@ -37,15 +37,19 @@ from transcriptor_prime import (
     LOGO_PATH,
     media,
 )
+from transcriptor_prime import diarizer as diarizer_mod
 from transcriptor_prime import settings as settings_mod
+from transcriptor_prime import speakers as speakers_mod
 from transcriptor_prime.formatting import format_duration, format_timecode
 from transcriptor_prime.settings import (
     APPEARANCE_MODES,
     LANGUAGES,
+    MAX_SPEAKERS,
     MODEL_NOTES,
     MODEL_SIZES,
     UI_SCALES,
 )
+from transcriptor_prime.speaker_dialog import SpeakerDialog
 from transcriptor_prime.transcriber import (
     CANCELLED,
     COMPLETED,
@@ -65,6 +69,7 @@ from transcriptor_prime.widgets import (
     apply_queue_columns,
     style_queue_tree,
 )
+from transcriptor_prime.widgets import work_area as _work_area
 
 #: Extra magnification labels, mapped to the percentages in settings.UI_SCALES.
 _SCALE_LABELS = {f"{pct}%": pct for pct in UI_SCALES}
@@ -117,6 +122,10 @@ class TranscriptorApp:
         self.output_is_manual = False
         self.last_output: Path | None = None
         self.batch_outputs: list[Path] = []
+        # How many speakers each finished file names, in queue order; what
+        # decides whether the naming window opens by itself after a run.
+        self._run_speakers: list[int] = []
+        self.speaker_dialog: SpeakerDialog | None = None
 
         # The queue. `items` is keyed by Treeview iid; the tree itself owns the
         # ordering. iids come from a counter and are never reused, which is
@@ -162,6 +171,8 @@ class TranscriptorApp:
         self.var_wrap = tk.IntVar(value=s.wrap_width)
         self.var_condition = tk.BooleanVar(value=s.condition_on_previous_text)
         self.var_subfolders = tk.BooleanVar(value=s.scan_subfolders)
+        self.var_speakers = tk.BooleanVar(value=s.identify_speakers)
+        self.var_num_speakers = tk.IntVar(value=s.num_speakers)
         self.var_status = tk.StringVar(value="Idle.")
         self.var_percent = tk.StringVar(value="")
         self.var_batch_percent = tk.StringVar(value="")
@@ -191,7 +202,10 @@ class TranscriptorApp:
             columns=("length", "kind", "status"),
             show="tree headings",
             selectmode="extended",
-            height=6,
+            # One row shorter than it was: that is what pays for the speaker
+            # row in Options, so the log pane keeps its height at the largest
+            # Text size on a scaled display.
+            height=5,
         )
         self.tree.heading("#0", text="File", anchor="w")
         self.tree.heading("length", text="Length", anchor="e")
@@ -202,7 +216,7 @@ class TranscriptorApp:
 
         # The scrollbar is given a deliberately small height so the Treeview,
         # not it, decides how tall the row is; "ns" then stretches it to match.
-        # CTkScrollbar defaults to 200px, which is taller than six rows and left
+        # CTkScrollbar defaults to 200px, which is taller than the list and left
         # the bar hanging past the bottom of the list.
         self.tree_scroll = ctk.CTkScrollbar(
             tree_frame, orientation="vertical", height=40, command=self.tree.yview
@@ -351,8 +365,33 @@ class TranscriptorApp:
             row=3, column=0, columnspan=5, sticky="w", padx=(PAD, 0), pady=(PAD, 0)
         )
 
+        speaker_row = ctk.CTkFrame(opts, fg_color="transparent")
+        # Tighter than its neighbours: the spinbox makes this row taller than a
+        # bare checkbox, and at the largest Text size every pixel here comes
+        # out of the log pane.
+        speaker_row.grid(
+            row=4, column=0, columnspan=5, sticky="w", padx=(PAD, 0), pady=(2, 0)
+        )
+        self.chk_speakers = ctk.CTkCheckBox(
+            speaker_row,
+            text="Identify speakers (who said what)",
+            variable=self.var_speakers,
+            command=self._refresh_speaker_state,
+        )
+        self.chk_speakers.grid(row=0, column=0, sticky="w")
+        ctk.CTkLabel(speaker_row, text="Speakers").grid(
+            row=0, column=1, sticky="e", padx=(PAD * 3, 0)
+        )
+        self.spn_speakers = CTkSpinbox(
+            speaker_row, variable=self.var_num_speakers, from_=0, to=MAX_SPEAKERS
+        )
+        self.spn_speakers.grid(row=0, column=2, sticky="w", padx=(PAD, 0))
+        ctk.CTkLabel(speaker_row, text="(0 = work it out)").grid(
+            row=0, column=3, sticky="w", padx=(4, PAD)
+        )
+
         ctk.CTkLabel(opts, text="Appearance").grid(
-            row=4, column=0, sticky="w", padx=(PAD, 0), pady=(PAD, PAD)
+            row=5, column=0, sticky="w", padx=(PAD, 0), pady=(PAD, PAD)
         )
         self.seg_appearance = ctk.CTkSegmentedButton(
             opts,
@@ -361,11 +400,11 @@ class TranscriptorApp:
         )
         self.seg_appearance.set(_appearance_label(self.settings.appearance))
         self.seg_appearance.grid(
-            row=4, column=1, sticky="w", padx=(PAD, 0), pady=(PAD, PAD)
+            row=5, column=1, sticky="w", padx=(PAD, 0), pady=(PAD, PAD)
         )
 
         ctk.CTkLabel(opts, text="Text size").grid(
-            row=4, column=2, sticky="e", pady=(PAD, PAD)
+            row=5, column=2, sticky="e", pady=(PAD, PAD)
         )
         self.seg_scale = ctk.CTkSegmentedButton(
             opts,
@@ -374,7 +413,7 @@ class TranscriptorApp:
         )
         self.seg_scale.set(f"{self.settings.ui_scale}%")
         self.seg_scale.grid(
-            row=4, column=3, columnspan=2, sticky="w", padx=(PAD, PAD), pady=(PAD, PAD)
+            row=5, column=3, columnspan=2, sticky="w", padx=(PAD, PAD), pady=(PAD, PAD)
         )
 
         # --- Progress ---------------------------------------------------
@@ -434,16 +473,20 @@ class TranscriptorApp:
         buttons = ctk.CTkFrame(frame, fg_color="transparent")
         buttons.grid(row=row, column=0, columnspan=3, sticky="e", pady=(PAD, 0))
 
+        self.btn_name_speakers = ctk.CTkButton(
+            buttons, text="Name speakers…", command=self._on_name_speakers
+        )
+        self.btn_name_speakers.grid(row=0, column=0, padx=(0, PAD))
         self.btn_open = ctk.CTkButton(
             buttons, text="Show transcript", command=self._on_open, state="disabled"
         )
-        self.btn_open.grid(row=0, column=0, padx=(0, PAD))
+        self.btn_open.grid(row=0, column=1, padx=(0, PAD))
         self.btn_cancel = ctk.CTkButton(
             buttons, text="Cancel", command=self._on_cancel
         )
-        self.btn_cancel.grid(row=0, column=1, padx=(0, PAD))
+        self.btn_cancel.grid(row=0, column=2, padx=(0, PAD))
         self.btn_start = ctk.CTkButton(buttons, text="Start", command=self._on_start)
-        self.btn_start.grid(row=0, column=2)
+        self.btn_start.grid(row=0, column=3)
 
     def _fit_to_screen(self) -> None:
         """Never open larger than the desktop can show.
@@ -809,6 +852,11 @@ class TranscriptorApp:
             f"{format_duration(duration / factor)} on this CPU "
             "(varies with audio quality)."
         )
+        if self.var_speakers.get():
+            self._log(
+                "Identifying speakers is a separate pass over each file first — "
+                "allow a few minutes more per hour of audio."
+            )
 
     def _on_save_as(self) -> None:
         if self.running or len(self.items) >= 2:
@@ -866,6 +914,7 @@ class TranscriptorApp:
         self.cancel.clear()
         self.last_output = None
         self.batch_outputs = []
+        self._run_speakers = []
         self._run_iids = list(self.tree.get_children())
         for iid in self._run_iids:
             item = self.items[iid]
@@ -957,6 +1006,8 @@ class TranscriptorApp:
                     cpu_threads=s.resolved_cpu_threads(),
                     duration=item.info.duration if item.info else 0.0,
                     condition_on_previous_text=s.condition_on_previous_text,
+                    identify_speakers=s.identify_speakers,
+                    num_speakers=s.num_speakers,
                 )
             )
         return jobs
@@ -969,9 +1020,11 @@ class TranscriptorApp:
             s.interval_seconds = int(self.var_interval.get())
             s.wrap_width = int(self.var_wrap.get())
             s.cpu_threads = int(self.var_threads.get())
+            s.num_speakers = int(self.var_num_speakers.get())
         except tk.TclError:
             # A spinbox left empty or containing junk; fall back to defaults.
             pass
+        s.identify_speakers = bool(self.var_speakers.get())
         s.appearance = _APPEARANCE_LABELS.get(self.seg_appearance.get(), "system")
         s.ui_scale = _SCALE_LABELS.get(self.seg_scale.get(), 100)
         s.condition_on_previous_text = bool(self.var_condition.get())
@@ -980,6 +1033,7 @@ class TranscriptorApp:
         self.var_interval.set(s.interval_seconds)
         self.var_wrap.set(s.wrap_width)
         self.var_threads.set(s.resolved_cpu_threads())
+        self.var_num_speakers.set(s.num_speakers)
 
     def _on_cancel(self) -> None:
         if self.worker and self.worker.is_alive():
@@ -1026,9 +1080,21 @@ class TranscriptorApp:
                 f"{format_timecode(event.audio_done)} of "
                 f"{format_timecode(event.audio_total)}"
             )
-            self.var_status.set(
-                f"Transcribing… elapsed {format_duration(event.elapsed)}{eta}"
-            )
+            if event.phase == "speakers":
+                # A pass of its own, before any text exists. There is no honest
+                # ETA for it: the engine is silent for its first stretch.
+                self.var_percent.set(
+                    f"Identifying speakers   {event.fraction * 100:.0f}%"
+                    if event.audio_done > 0
+                    else "Identifying speakers…"
+                )
+                self.var_status.set(
+                    f"Identifying speakers… elapsed {format_duration(event.elapsed)}"
+                )
+            else:
+                self.var_status.set(
+                    f"Transcribing… elapsed {format_duration(event.elapsed)}{eta}"
+                )
             self.var_batch_progress.set(event.batch_fraction)
             if event.file_count > 1:
                 batch_eta = (
@@ -1053,11 +1119,14 @@ class TranscriptorApp:
             item = self._mark(event.index, status)
             if item is not None:
                 item.output = event.output
+            self._run_speakers.append(event.speakers)
             if event.status == COMPLETED and event.output is not None:
                 self.batch_outputs.append(event.output)
                 self._log(f"Saved to {event.output}")
             elif event.status == CANCELLED and event.output is not None:
                 self._log(f"Partial transcript saved to {event.output}")
+            elif event.status == CANCELLED:
+                self._log("Cancelled before any text was produced.")
             elif event.status not in (COMPLETED, CANCELLED):
                 self._log(f"FAILED: {event.source.name} — {event.message}")
 
@@ -1133,12 +1202,27 @@ class TranscriptorApp:
         if event.message:
             messagebox.showerror(APP_NAME, event.message)
 
+        # One file, finished, with speakers in it: the obvious next step is to
+        # say who they are. A queue never interrupts — its files are named
+        # afterwards, one at a time, from the button. Scheduled rather than
+        # called so this handler returns before a modal window opens.
+        if (
+            len(self._run_iids) == 1
+            and event.completed == 1
+            and len(self._run_speakers) == 1
+            and self._run_speakers[0] > 0
+            and self.last_output is not None
+        ):
+            target = self.last_output
+            self.root.after(150, lambda: self._open_speaker_dialog(target))
+
     def _set_running(self, running: bool) -> None:
         self.running = running
         widgets = [
             self.btn_browse, self.btn_add_folder, self.btn_remove, self.btn_clear,
             self.btn_start, self.spn_interval, self.spn_threads, self.spn_wrap,
             self.chk_condition, self.chk_subfolders, self.seg_appearance,
+            self.chk_speakers, self.spn_speakers, self.btn_name_speakers,
         ]
         for widget in widgets:
             widget.configure(state="disabled" if running else "normal")
@@ -1151,6 +1235,7 @@ class TranscriptorApp:
         self.tree.state(["disabled"] if running else ["!disabled"])
 
         self._refresh_output_state()
+        self._refresh_speaker_state()
 
         self.btn_cancel.configure(
             state="normal" if running else "disabled", text="Cancel"
@@ -1188,6 +1273,78 @@ class TranscriptorApp:
         except OSError as exc:
             messagebox.showerror(APP_NAME, f"Could not open the folder: {exc}")
 
+    def _refresh_speaker_state(self) -> None:
+        """The speaker count only means something while the box above is ticked."""
+        usable = not self.running and bool(self.var_speakers.get())
+        self.spn_speakers.configure(state="normal" if usable else "disabled")
+
+    def _on_name_speakers(self) -> None:
+        """Open the naming window for the most relevant transcript.
+
+        A selected finished row wins, then the last run's transcript, and
+        failing both the user is asked for a file — which is what lets a
+        transcript from last week, or from another machine, be named too.
+        """
+        if self.running:
+            return
+        target: Path | None = None
+        for iid in self.tree.selection():
+            item = self.items.get(iid)
+            if item and item.output and item.output.exists():
+                target = item.output
+                break
+        if target is None and self.last_output and self.last_output.exists():
+            target = self.last_output
+        if target is None:
+            chosen = filedialog.askopenfilename(
+                title="Choose a transcript to name the speakers in",
+                initialdir=self.settings.last_output_dir or str(Path.home()),
+                filetypes=[("Transcript", "*.txt"), ("All files", "*.*")],
+            )
+            if not chosen:
+                return
+            target = Path(chosen)
+        self._open_speaker_dialog(target)
+
+    def _open_speaker_dialog(self, target: Path) -> None:
+        if self.running or self.speaker_dialog is not None:
+            return
+        try:
+            parsed = speakers_mod.parse(target)
+        except (OSError, UnicodeDecodeError) as exc:
+            messagebox.showerror(APP_NAME, f"Could not read '{target.name}': {exc}")
+            return
+        if not parsed.speakers:
+            messagebox.showinfo(
+                APP_NAME,
+                f"'{target.name}' has no speaker labels.\n\n"
+                "Tick 'Identify speakers' in Options and transcribe the recording "
+                "again to get a transcript that says who is talking.",
+            )
+            return
+
+        # The queue knows where this transcript's recording is even if it has
+        # since been given a different name or folder than the header records.
+        hint = next(
+            (i.path for i in self._queue_items() if i.output == target), None
+        )
+
+        def closed() -> None:
+            self.speaker_dialog = None
+
+        def applied(path: Path, mapping: dict[str, str]) -> None:
+            names = ", ".join(f"{old} → {new}" for old, new in mapping.items())
+            self._log(f"Named the speakers in {path.name}: {names}")
+
+        self.speaker_dialog = SpeakerDialog(
+            self.root,
+            parsed,
+            source=speakers_mod.find_source(parsed, hint),
+            on_applied=applied,
+            on_closed=closed,
+            apply_icon=_apply_icon,
+        )
+
     def _on_close(self) -> None:
         if self.worker and self.worker.is_alive():
             remaining = sum(
@@ -1206,6 +1363,11 @@ class TranscriptorApp:
             ):
                 return
             self.cancel.set()
+        # The worker is a daemon thread and dies with the window; the speaker
+        # engine is a separate process and would not.
+        diarizer_mod.kill_active()
+        if self.speaker_dialog is not None:
+            self.speaker_dialog.close()
         self._capture_settings()
         settings_mod.save(self.settings)
         if self._appearance_callback is not None:
@@ -1240,24 +1402,6 @@ def _reveal(target: Path, select: bool = True) -> None:
         subprocess.Popen(["open", "-R", path] if select else ["open", str(target.parent)])
     else:
         subprocess.Popen(["xdg-open", str(target.parent)])
-
-
-def _work_area(window: tk.Misc) -> tuple[int, int]:
-    """The desktop area a window can actually occupy, taskbar excluded."""
-    if sys.platform == "win32":
-        try:
-            import ctypes
-            from ctypes import wintypes
-
-            rect = wintypes.RECT()
-            SPI_GETWORKAREA = 0x0030
-            if ctypes.windll.user32.SystemParametersInfoW(
-                SPI_GETWORKAREA, 0, ctypes.byref(rect), 0
-            ):
-                return rect.right - rect.left, rect.bottom - rect.top
-        except Exception:
-            pass
-    return window.winfo_screenwidth(), window.winfo_screenheight()
 
 
 def _monospace_family() -> str:

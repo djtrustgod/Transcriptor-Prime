@@ -29,6 +29,10 @@ APPEARANCE_MODES = ("system", "light", "dark")
 # to stay shorter than a 1080p screen at the largest setting.
 UI_SCALES = (100, 115, 130)
 
+# The most speakers the "Speakers" box will promise the engine. An interview is
+# two to four voices; past ten, telling the count is no longer the hard part.
+MAX_SPEAKERS = 10
+
 # Whisper language codes worth surfacing; "auto" lets Whisper detect. Forcing a
 # language is worth doing when you know it, as detection samples only the
 # opening audio and can be wrong on a noisy intro.
@@ -86,6 +90,8 @@ class Settings:
     cpu_threads: int = 0  # 0 means "use default_cpu_threads()"
     condition_on_previous_text: bool = True
     scan_subfolders: bool = False  # whether "Add folder…" recurses
+    identify_speakers: bool = False  # label who said what (a slower, extra pass)
+    num_speakers: int = 0  # 0 means "let the engine work it out"
     appearance: str = "system"  # one of APPEARANCE_MODES
     ui_scale: int = 100  # one of UI_SCALES; percent, on top of display scaling
     last_input_dir: str = ""
@@ -109,6 +115,8 @@ class Settings:
         self.cpu_threads = max(0, min(64, int(self.cpu_threads)))
         self.condition_on_previous_text = bool(self.condition_on_previous_text)
         self.scan_subfolders = bool(self.scan_subfolders)
+        self.identify_speakers = bool(self.identify_speakers)
+        self.num_speakers = max(0, min(MAX_SPEAKERS, int(self.num_speakers)))
         return self
 
 

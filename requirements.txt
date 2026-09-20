@@ -11,3 +11,16 @@ faster-whisper==1.2.1
 # AppsUseLightTheme registry value -- that is how the app follows the system
 # light/dark setting -- plus packaging. Pure Python; no compiled extension.
 customtkinter==6.0.0
+
+# Speaker identification ("who said what"): pyannote segmentation plus a speaker
+# embedding model, run through ONNX -- no PyTorch. Only ever imported by
+# diarize_worker.py, in a child process; see "Why a subprocess" in
+# ARCHITECTURE.md.
+#
+# Both lines are needed and must match. sherpa-onnx is a thin binding; the
+# native libraries, including its own onnxruntime.dll, live in sherpa-onnx-core.
+# If the core wheel goes missing the binding silently picks up the old
+# onnxruntime.dll that ships in Windows' System32 and fails much later with an
+# unrelated-looking "API version" error.
+sherpa-onnx==1.13.8
+sherpa-onnx-core==1.13.8

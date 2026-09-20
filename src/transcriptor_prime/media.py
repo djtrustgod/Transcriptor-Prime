@@ -114,6 +114,72 @@ def _duration_seconds(container, stream) -> float:
     return 0.0
 
 
+def decode_clip(
+    path: str | Path, start: float, duration: float, rate: int = 22050
+) -> bytes:
+    """A few seconds of a recording as 16-bit mono PCM, for a voice sample.
+
+    Seeks rather than decoding from the top, so a clip from the third hour of a
+    recording costs the same as one from the first minute. Raises
+    :class:`MediaError` on failure.
+    """
+    import av
+    from av.audio.resampler import AudioResampler
+
+    path = Path(path)
+    try:
+        container = av.open(str(path))
+    except Exception as exc:
+        raise MediaError(f"Could not open '{path.name}' as a media file: {exc}") from exc
+
+    try:
+        if not container.streams.audio:
+            raise MediaError(f"'{path.name}' contains no audio track.")
+        stream = container.streams.audio[0]
+        start = max(0.0, float(start))
+        if start > 0 and stream.time_base:
+            container.seek(
+                int(start / stream.time_base), stream=stream, backward=True
+            )
+
+        resampler = AudioResampler(format="s16", layout="mono", rate=rate)
+        wanted = int(duration * rate) * 2  # bytes: 16-bit mono
+        pcm = bytearray()
+        for frame in container.decode(stream):
+            if frame.pts is None or frame.time is None:
+                continue
+            frame_end = frame.time + frame.samples / frame.sample_rate
+            if frame_end <= start:
+                continue  # a seek lands on the keyframe *before* the target
+            for converted in resampler.resample(frame):
+                data = bytes(converted.planes[0])[: converted.samples * 2]
+                if not pcm and frame.time < start:
+                    # Trim the part of the first frame that precedes the target.
+                    skip = int((start - frame.time) * rate) * 2
+                    data = data[skip:]
+                pcm += data
+            if len(pcm) >= wanted:
+                break
+        return bytes(pcm[:wanted])
+    except MediaError:
+        raise
+    except Exception as exc:
+        raise MediaError(f"Could not read audio from '{path.name}': {exc}") from exc
+    finally:
+        container.close()
+
+
+def write_wav(path: str | Path, pcm: bytes, rate: int = 22050) -> None:
+    """Write 16-bit mono PCM as a WAV file — the one format ``winsound`` plays."""
+    import wave
+
+    with wave.open(str(path), "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(rate)
+        wav.writeframes(pcm)
+
+
 def default_output_path(source: str | Path) -> Path:
     """``<source dir>/<source stem>.txt`` — the plan's default save location."""
     source = Path(source)

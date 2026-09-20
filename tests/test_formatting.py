@@ -6,6 +6,7 @@ import pytest
 
 from transcriptor_prime import __version__
 from transcriptor_prime.formatting import (
+    Block,
     ParagraphBuilder,
     build_header,
     format_duration,
@@ -151,3 +152,69 @@ class TestHeader:
             generated_at=datetime(2026, 1, 1, 9, 0),
         )
         assert "Language:   es (forced)" in header
+
+
+class TestSpeakers:
+    """Speaker labels are additive: absent, the output is what it always was."""
+
+    def test_a_block_with_a_speaker_names_them_on_the_timecode_line(self):
+        block = Block(start=7, end=20, text="Well, it was back in 1998.", speaker="Jane Doe")
+        assert block.render(100) == "[00:00:07] Jane Doe:\nWell, it was back in 1998.\n"
+
+    def test_a_block_without_a_speaker_renders_exactly_as_before(self):
+        assert Block(start=7, end=20, text="Hello.").render(100) == "[00:00:07]\nHello.\n"
+
+    def test_the_label_line_is_never_wrapped(self):
+        name = "Professor Bartholomew Featherstonehaugh"
+        rendered = Block(start=0, end=5, text="a b c", speaker=name).render(10)
+        assert rendered.splitlines()[0] == f"[00:00:00] {name}:"
+
+    def test_a_change_of_speaker_closes_the_block(self):
+        builder = ParagraphBuilder(interval_seconds=30)
+        assert builder.add_run(0, 4, "So how did it start?", "Speaker 1") == []
+        closed = builder.add_run(5, 9, "Well.", "Speaker 2")
+        assert [(b.speaker, b.text) for b in closed] == [
+            ("Speaker 1", "So how did it start?")
+        ]
+        last = builder.flush()
+        assert (last.speaker, last.start, last.text) == ("Speaker 2", 5, "Well.")
+
+    def test_a_long_answer_repeats_the_name_every_interval(self):
+        builder = ParagraphBuilder(interval_seconds=30)
+        blocks = []
+        for start in range(0, 90, 10):
+            blocks += builder.add_run(start, start + 10, "words", "Speaker 1")
+        assert [b.start for b in blocks] == [0, 30, 60]
+        assert {b.speaker for b in blocks} == {"Speaker 1"}
+
+    def test_one_run_can_close_two_blocks(self):
+        builder = ParagraphBuilder(interval_seconds=30)
+        builder.add_run(0, 5, "Question?", "Speaker 1")
+        closed = builder.add_run(5, 40, "A very long answer.", "Speaker 2")
+        assert [b.speaker for b in closed] == ["Speaker 1", "Speaker 2"]
+        assert builder.flush() is None
+
+    def test_add_is_unchanged_by_the_speaker_machinery(self):
+        with_add, with_run = ParagraphBuilder(30), ParagraphBuilder(30)
+        segments = [(0, 12, "one"), (12, 31, "two"), (31, 40, " "), (40, 45, "three")]
+        rendered_add = [with_add.add(*s) for s in segments] + [with_add.flush()]
+        rendered_run = [
+            (with_run.add_run(*s) or [None])[0] for s in segments
+        ] + [with_run.flush()]
+        assert rendered_add == rendered_run
+
+    def test_header_lists_speakers_only_when_given(self):
+        common = dict(
+            source_name="talk.mp3",
+            duration=60,
+            model="small",
+            language="en",
+            language_detected=False,
+            language_probability=None,
+            generated_at=datetime(2026, 9, 19, 10, 30),
+        )
+        plain = build_header(**common)
+        assert "Speakers:" not in plain
+        named = build_header(**common, speakers=["Speaker 1", "Speaker 2"])
+        assert "Language:   en (forced)\nSpeakers:   Speaker 1, Speaker 2\nGenerated:" in named
+        assert named.replace("Speakers:   Speaker 1, Speaker 2\n", "") == plain
