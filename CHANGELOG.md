@@ -7,9 +7,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [2.0.0] - 2026-09-19
+### Changed
 
-The transcript can now say who is talking, and a new window puts names to the voices.
+- **The window is laid out as four outlined cards — Files, Options, Progress and Log — each with
+  a bold title**, so the sections read as separate. Before, the section names were the same size
+  and weight as every field label, only Options had a visible panel, and the file list, progress
+  bars and log ran together.
+- The queue summary (*3 files · 2h 14m total*) and **Include subfolders** now sit beside the
+  **Files** title instead of under the list, and the status sentence and percentage sit beside
+  the **Progress** title instead of taking a row each. That is what pays for the cards' padding:
+  at 100% the window is 33 px taller on a 150%-scaled display and the log pane is the same height.
+- The "seconds" and "chars (0 = off)" labels in Options line up with their spin boxes; they sat a
+  few pixels high.
+
+### Removed
+
+- The **130% Text size**. It already needed more height than a 1504-px-tall display at 150%
+  scaling has, leaving a two-line log. 100% and 115% remain; a saved 130% opens at 100%.
+
+## [2.0.0 BETA] - 2026-09-19
+
+The transcript can now say who is talking, and a new window puts names to the voices. This
+release is labelled **BETA**: the window title, the startup log and every transcript's
+`Created by:` line read `Transcriptor Prime 2.0.0 BETA`. (`pyproject.toml` spells the same
+version `2.0.0b0`, the PEP 440 form.)
 
 ### Added
 

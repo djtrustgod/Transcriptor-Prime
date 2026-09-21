@@ -1,6 +1,6 @@
 <img src="src/transcriptor_prime/assets/logo.png" alt="" width="88" align="right">
 
-# Transcriptor Prime 2.0.0
+# Transcriptor Prime 2.0.0 BETA
 
 A desktop app that turns audio or video recordings into plain-text transcripts with periodic
 timecodes. Everything runs **locally** — no cloud service, no API key, and nothing about your
@@ -94,10 +94,17 @@ without a restart.
 To pin it regardless of the desktop, set **Appearance** in Options to *Light* or *Dark*. The
 choice is remembered.
 
-If the interface is hard to read, **Text size** in Options enlarges the whole window — 100%, 115%
-or 130% on top of whatever Windows display scaling is already set to. 100% is the correct size for
-your monitor; the larger settings are deliberate extra magnification. The window never opens taller
-than the desktop, so at the largest setting on a small screen the log pane ends up short.
+The window is laid out as four outlined cards with bold titles — **Files**, **Options**,
+**Progress** and **Log** — so it is obvious where one part ends and the next begins. The Files
+title row also carries the queue summary (*3 files · 2h 14m total*) and the **Include subfolders**
+switch; the Progress title row carries the current status on the left and the percentage on the
+right.
+
+If the interface is hard to read, **Text size** in Options enlarges the whole window — 100% or
+115% on top of whatever Windows display scaling is already set to. 100% is the correct size for
+your monitor; 115% is deliberate extra magnification. The window never opens taller than the
+desktop, so at 115% on a small screen the log pane ends up short. (Earlier versions also offered
+130%; a saved 130% now opens at 100%.)
 
 ## What the transcript looks like
 
@@ -110,7 +117,7 @@ Duration:   00:00:31
 Model:      small (int8, CPU)
 Language:   en (detected, 0.99)
 Generated:  2026-08-02 15:28
-Created by: Transcriptor Prime 2.0.0
+Created by: Transcriptor Prime 2.0.0 BETA
 
 ------------------------------------------------------------
 
@@ -142,7 +149,7 @@ Model:      small (int8, CPU)
 Language:   en (detected, 0.99)
 Speakers:   Interviewer, Jane Doe
 Generated:  2026-09-19 10:30
-Created by: Transcriptor Prime 2.0.0
+Created by: Transcriptor Prime 2.0.0 BETA
 
 ------------------------------------------------------------
 
@@ -332,7 +339,7 @@ pin again from the Start Menu.
 The running version appears in the window title and the first line of the log. Every transcript
 also records it in its `Created by:` header line.
 
-This is **2.0.0**, which adds speaker identification and the *Name speakers…* window. A
+This is **2.0.0 BETA**, which adds speaker identification and the *Name speakers…* window. A
 transcript made without speaker identification is byte-for-byte what 1.0.0 produced. Changes to
 the transcript format or the option set from here will be additive, and anything that is not
 will get a major version. See

@@ -24,10 +24,11 @@ MODEL_NOTES = {
 APPEARANCE_MODES = ("system", "light", "dark")
 
 # Extra magnification on top of the display's own scaling, as a percentage.
-# 100 means "exactly what Windows asks for"; the larger values are for anyone
-# who wants the window bigger than that. Capped at 130 because the window has
-# to stay shorter than a 1080p screen at the largest setting.
-UI_SCALES = (100, 115, 130)
+# 100 means "exactly what Windows asks for"; 115 is for anyone who wants the
+# window bigger than that. There was a 130 as well, until the window grew
+# section cards: at 130 it no longer fitted a 1504-px-tall display at 150%
+# scaling with a usable log pane. A saved 130 falls back to 100 in sanitized().
+UI_SCALES = (100, 115)
 
 # The most speakers the "Speakers" box will promise the engine. An interview is
 # two to four voices; past ten, telling the count is no longer the hard part.

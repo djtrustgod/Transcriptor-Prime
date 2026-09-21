@@ -8,7 +8,7 @@ src/transcriptor_prime/
   __main__.py    entry point; turns a startup crash into a dialog
   app.py         the window, file queue, event pump
   speaker_dialog.py  the "Name speakers" window
-  widgets.py     the queue's ttk theming and a spinbox   (these three = all Tk)
+  widgets.py     section cards, queue ttk theming, spinbox (these three = all Tk)
   transcriber.py worker thread wrapping faster-whisper   (no Tk imports)
   diarizer.py    launches and supervises the speaker engine's child process
   diarize_worker.py  that child: the only importer of sherpa_onnx
@@ -47,8 +47,8 @@ were; the migration touched the widgets and nothing below them. It is pure Pytho
 `darkdetect` and `packaging`, so `run.bat` still has no compiled dependency to install for the UI.
 
 What it does not have is a table widget, a spinbox, a label-frame, or replacements for `filedialog`
-and `messagebox`. The first two are dealt with below; a label-frame is a heading label above a
-plain frame; and the two dialog modules stay stock, which on Windows means they are native.
+and `messagebox`. The first two are dealt with below; the label-frame is `widgets.Section`, also
+below; and the two dialog modules stay stock, which on Windows means they are native.
 
 **Silero VAD (`vad_filter=True`).** Voice-activity detection skips silence, which both speeds up
 long recordings and suppresses Whisper's habit of inventing text over quiet passages — the failure
@@ -366,8 +366,8 @@ moved between machines and renamed again.
   asynchronously, hence the temp file; every Play and Stop bumps a request counter so a decode
   that finishes late is recognisably stale.
 - The options row that turns the feature on made the main window one row taller. The queue list
-  is one row shorter to pay for it, so that at the 130% Text size on a 1504-px-tall display at
-  150% scaling the log pane keeps the height it had (measured: 93 px, was 98).
+  is one row shorter to pay for it. (That was tuned for the 130% Text size, which has since been
+  removed — see "Section cards" below.)
 
 ## Failure handling
 
@@ -457,6 +457,39 @@ unscaled units rather than device pixels.
 The largest setting on a small panel leaves the log only a few lines tall. That is the trade the
 setting exists to offer, and the clamp is what keeps it merely cramped rather than unusable.
 
+### Section cards
+
+The window is four `widgets.Section` cards in one column — Files, Options, Progress, Log — with the
+action buttons underneath. `TranscriptorApp.sections` holds them by title. A `Section` is a
+`CTkFrame` with a 1-px border, a bold 15-px title *inside* it, a `header` frame (the title's row)
+and a `body` frame (everything else).
+
+It replaces "a heading label above a plain frame", which did not work as a heading: the label was
+the same size and weight as every field label around it, only Options had a visible panel, and
+Files, the progress bars and the Log ran together. The border is not decoration. A `CTkFrame`'s
+fill is a few grey levels off the window's (`gray17` on `gray14` in dark mode), which the eye does
+not pick up as an edge; `SECTION_BORDER` is what separates the cards.
+
+Cards cost vertical space — padding top and bottom, four times — and the window has little to
+spare. The header row is how that is paid for. The queue summary and *Include subfolders* moved up
+beside the **Files** title (they had a row of their own under the list), and the status sentence
+and percentage moved beside the **Progress** title (a row each, one of them blank whenever idle).
+In the Progress header the status column carries the weight, so in a narrow window it is the
+status that clips, never the percentage; every status is also written to the log.
+
+Measured on a 2256×1504 display at 150% scaling (work area 1432 px tall), natural window height:
+
+| Text size | before | after | log pane |
+| --- | --- | --- | --- |
+| 100% | 1233 px | 1266 px | 165 px, unchanged |
+| 115% | — | 1420 px | 189 px |
+| 130% | needs 1506 px — did not fit | removed | was 93 px, about two lines |
+
+130% already needed more height than that screen has before this change, and was only usable
+because `_fit_to_screen()` crushed the log to two lines. The cards would have taken still more
+out of it, so `UI_SCALES` is now `(100, 115)`. `Settings.sanitized()` sends a saved 130 to 100, the
+same path any unknown value takes.
+
 ## Windows integration: icon and taskbar
 
 Three separate pieces have to line up before the app gets a proper taskbar button.
@@ -524,7 +557,9 @@ enforces this.
   intermittently, and the fixture's display check would have reported any such failure as a skip
   rather than a failure. `TestQueue` covers add/remove/clear, deduplication and the running-guard;
   `TestQueueOutputPaths` covers the single-file back-compat surface that is most likely to rot;
-  `TestSpinbox` and `TestAppearance` cover the two pieces in `widgets.py`.
+  `TestSpinbox` and `TestAppearance` cover the two pieces in `widgets.py`; `TestSections` asserts
+  the four cards' order, outline and bold titles, which card each widget sits in, and that the
+  Log is the one that absorbs extra height.
 - `test_branding.py` — parses the committed `.ico` and asserts the size set, the BMP/PNG split,
   the file size ceiling, and that the taskbar identity round-trips through the Windows shell API.
 

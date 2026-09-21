@@ -586,8 +586,57 @@ class TestAppearance:
         )
 
 
+def _section_of(app, widget) -> str | None:
+    """Title of the section card a widget sits in, however deeply nested."""
+    by_card = {card: title for title, card in app.sections.items()}
+    while widget is not None:
+        if widget in by_card:
+            return by_card[widget]
+        widget = getattr(widget, "master", None)
+    return None
+
+
+class TestSections:
+    """The window is four titled cards, so its parts read as separate."""
+
+    def test_the_cards_run_top_to_bottom_in_reading_order(self, app):
+        assert list(app.sections) == ["Files", "Options", "Progress", "Log"]
+        rows = [int(card.grid_info()["row"]) for card in app.sections.values()]
+        assert rows == sorted(rows)
+
+    def test_every_card_is_outlined_and_has_a_bold_title(self, app):
+        """The border is what separates the cards in dark mode."""
+        for card in app.sections.values():
+            assert card.cget("border_width") >= 1
+            assert card.title.cget("font").cget("weight") == "bold"
+
+    def test_each_widget_sits_in_the_section_that_names_it(self, app):
+        assert _section_of(app, app.tree) == "Files"
+        assert _section_of(app, app.btn_browse) == "Files"
+        assert _section_of(app, app.entry_output) == "Files"
+        assert _section_of(app, app.chk_subfolders) == "Files"
+        assert _section_of(app, app.cmb_model) == "Options"
+        assert _section_of(app, app.chk_speakers) == "Options"
+        assert _section_of(app, app.progress) == "Progress"
+        assert _section_of(app, app.progress_batch) == "Progress"
+        assert _section_of(app, app.log) == "Log"
+        # The action buttons belong to the window, not to any one section.
+        assert _section_of(app, app.btn_start) is None
+
+    def test_the_log_is_the_card_that_absorbs_extra_height(self, app):
+        outer = app.sections["Log"].master
+        weights = {
+            title: outer.grid_rowconfigure(int(card.grid_info()["row"]))["weight"]
+            for title, card in app.sections.items()
+        }
+        assert weights == {"Files": 0, "Options": 0, "Progress": 0, "Log": 1}
+
+
 class TestUiScale:
     """The Text size control magnifies on top of the display's own scaling."""
+
+    def test_only_sizes_that_fit_the_screen_are_offered(self, app):
+        assert list(app.seg_scale.cget("values")) == ["100%", "115%"]
 
     def test_the_control_starts_on_the_saved_scale(self, app):
         assert app.seg_scale.get() == "100%"
@@ -595,10 +644,10 @@ class TestUiScale:
 
     def test_choosing_a_size_records_and_applies_it(self, app):
         try:
-            app._on_scale_change("130%")
+            app._on_scale_change("115%")
 
-            assert app.settings.ui_scale == 130
-            assert ctk.ScalingTracker.widget_scaling == pytest.approx(1.3)
+            assert app.settings.ui_scale == 115
+            assert ctk.ScalingTracker.widget_scaling == pytest.approx(1.15)
         finally:
             # Scaling is global to the interpreter; do not leak it into the
             # next test's geometry assertions.

@@ -1,7 +1,9 @@
 """Widgets and theming that CustomTkinter does not ship.
 
-Four things live here, all of them Tk code:
+Five things live here, all of them Tk code:
 
+* :class:`Section` — CustomTkinter has no LabelFrame; this is the titled,
+  outlined card the window's Files, Options, Progress and Log panels are.
 * :func:`style_queue_tree` — the ttk-to-CustomTkinter colour bridge. The file
   queue is a ``ttk.Treeview`` because CustomTkinter has no table widget, so it
   is the one part of the window that does not repaint itself when the system
@@ -40,6 +42,11 @@ STATUS_COLORS: dict[str, tuple[str, str]] = {
 #: Secondary label text — the summary line and the "Save to" hint. CustomTkinter
 #: widgets take a pair directly, so this is only spelled out for reuse.
 MUTED_TEXT = ("#555555", "#a0a0a0")
+
+#: Outline of a :class:`Section` card. The card's fill is only a few grey levels
+#: off the window's — barely visible in dark mode — so the border is what
+#: actually separates one section from the next.
+SECTION_BORDER = ("gray68", "gray32")
 
 
 def pick(color: str | Sequence[str]) -> str:
@@ -185,6 +192,38 @@ def work_area(window: tk.Misc) -> tuple[int, int]:
     return window.winfo_screenwidth(), window.winfo_screenheight()
 
 
+class Section(ctk.CTkFrame):
+    """A titled card: the window's Files, Options, Progress and Log panels.
+
+    CustomTkinter has no LabelFrame. A bare heading label above a plain frame
+    is the usual stand-in, but at the same size and weight as every other label
+    it does not read as a heading, and the sections run into each other. This
+    is a bordered card with a bold title *inside* it, so where one section ends
+    and the next begins is visible at a glance, in light and dark alike.
+
+    ``header`` is the title's row and has room to its right — a section can put
+    a one-line summary or a control there instead of spending a row of its own.
+    ``body`` is where the section's widgets go.
+    """
+
+    def __init__(self, master: tk.Misc, title: str, **kwargs) -> None:
+        kwargs.setdefault("border_width", 1)
+        kwargs.setdefault("border_color", SECTION_BORDER)
+        super().__init__(master, **kwargs)
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(1, weight=1)
+
+        self.header = ctk.CTkFrame(self, fg_color="transparent")
+        self.header.grid(row=0, column=0, sticky="ew", padx=12, pady=(6, 0))
+        self.title = ctk.CTkLabel(
+            self.header, text=title, font=ctk.CTkFont(size=15, weight="bold")
+        )
+        self.title.grid(row=0, column=0, sticky="w")
+
+        self.body = ctk.CTkFrame(self, fg_color="transparent")
+        self.body.grid(row=1, column=0, sticky="nsew", padx=4, pady=(2, 4))
+
+
 class CTkSpinbox(ctk.CTkFrame):
     """An integer entry with step buttons, bound to a ``tk.IntVar``.
 
@@ -298,7 +337,9 @@ __all__ = [
     "CTkSpinbox",
     "MUTED_TEXT",
     "QUEUE_COLUMNS",
+    "SECTION_BORDER",
     "STATUS_COLORS",
+    "Section",
     "apply_queue_columns",
     "pick",
     "style_queue_tree",

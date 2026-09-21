@@ -66,6 +66,7 @@ from transcriptor_prime.transcriber import (
 from transcriptor_prime.widgets import (
     MUTED_TEXT,
     CTkSpinbox,
+    Section,
     apply_queue_columns,
     style_queue_tree,
 )
@@ -185,15 +186,36 @@ class TranscriptorApp:
         frame.grid(row=0, column=0, sticky="nsew", padx=PAD * 2, pady=PAD)
         self.root.rowconfigure(0, weight=1)
         self.root.columnconfigure(0, weight=1)
-        frame.columnconfigure(1, weight=1)
+        frame.columnconfigure(0, weight=1)
 
-        row = 0
+        # The window is four titled cards — Files, Options, Progress, Log —
+        # stacked in one column, with the action buttons underneath.
 
-        # --- Queue --------------------------------------------------------
-        ctk.CTkLabel(frame, text="Files").grid(row=row, column=0, sticky="nw")
+        # --- Files --------------------------------------------------------
+        files = Section(frame, "Files")
+        files.grid(row=0, column=0, sticky="ew", pady=(0, PAD))
 
-        tree_frame = ctk.CTkFrame(frame, fg_color="transparent")
-        tree_frame.grid(row=row, column=1, sticky="ew", padx=(PAD, PAD))
+        # The queue's one-line summary and the folder-scan switch share the
+        # title's row rather than taking a row of their own under the list.
+        files.header.columnconfigure(1, weight=1)
+        self.lbl_info = ctk.CTkLabel(
+            files.header, textvariable=self.var_source_info, text_color=MUTED_TEXT
+        )
+        self.lbl_info.grid(row=0, column=1, sticky="w", padx=(PAD * 2, PAD))
+        self.chk_subfolders = ctk.CTkCheckBox(
+            files.header,
+            text="Include subfolders",
+            variable=self.var_subfolders,
+        )
+        self.chk_subfolders.grid(row=0, column=2, sticky="e")
+
+        queue = files.body
+        queue.columnconfigure(1, weight=1)
+
+        tree_frame = ctk.CTkFrame(queue, fg_color="transparent")
+        tree_frame.grid(
+            row=0, column=0, columnspan=2, sticky="ew", padx=(PAD, PAD), pady=(2, 0)
+        )
         tree_frame.columnconfigure(0, weight=1)
         tree_frame.rowconfigure(0, weight=1)
 
@@ -233,8 +255,8 @@ class TranscriptorApp:
         self.tree.bind("<Double-1>", self._on_row_activate)
         self.tree.bind("<Delete>", lambda _event: self._on_remove())
 
-        queue_buttons = ctk.CTkFrame(frame, fg_color="transparent")
-        queue_buttons.grid(row=row, column=2, sticky="new")
+        queue_buttons = ctk.CTkFrame(queue, fg_color="transparent")
+        queue_buttons.grid(row=0, column=2, sticky="new", padx=(0, PAD), pady=(2, 0))
         queue_buttons.columnconfigure(0, weight=1)
         self.btn_browse = ctk.CTkButton(
             queue_buttons, text="Add files…", command=self._on_browse
@@ -252,59 +274,38 @@ class TranscriptorApp:
             queue_buttons, text="Clear", command=self._on_clear
         )
         self.btn_clear.grid(row=3, column=0, sticky="ew", pady=(4, 0))
-        row += 1
 
-        info_row = ctk.CTkFrame(frame, fg_color="transparent")
-        info_row.grid(row=row, column=1, sticky="ew", padx=(PAD, 0), pady=(2, PAD))
-        info_row.columnconfigure(0, weight=1)
-        self.lbl_info = ctk.CTkLabel(
-            info_row, textvariable=self.var_source_info, text_color=MUTED_TEXT
+        # Where the transcript goes belongs with what is being transcribed.
+        ctk.CTkLabel(queue, text="Save to").grid(
+            row=1, column=0, sticky="w", padx=(PAD, 0), pady=(PAD, 0)
         )
-        self.lbl_info.grid(row=0, column=0, sticky="w")
-        self.chk_subfolders = ctk.CTkCheckBox(
-            info_row,
-            text="Include subfolders",
-            variable=self.var_subfolders,
+        self.entry_output = ctk.CTkEntry(queue, textvariable=self.var_output)
+        self.entry_output.grid(
+            row=1, column=1, sticky="ew", padx=(PAD, PAD), pady=(PAD, 0)
         )
-        self.chk_subfolders.grid(row=0, column=1, sticky="e")
-        row += 1
-
-        # --- Destination ------------------------------------------------
-        ctk.CTkLabel(frame, text="Save to").grid(row=row, column=0, sticky="w")
-        self.entry_output = ctk.CTkEntry(frame, textvariable=self.var_output)
-        self.entry_output.grid(row=row, column=1, sticky="ew", padx=(PAD, PAD))
         self.btn_saveas = ctk.CTkButton(
-            frame, text="Save As…", command=self._on_save_as
+            queue, text="Save As…", command=self._on_save_as
         )
-        self.btn_saveas.grid(row=row, column=2, sticky="ew")
-        row += 1
+        self.btn_saveas.grid(row=1, column=2, sticky="ew", padx=(0, PAD), pady=(PAD, 0))
 
         ctk.CTkLabel(
-            frame,
+            queue,
             text="Defaults to a .txt file beside the source. "
             "With more than one file queued, every transcript goes beside its own source.",
             text_color=MUTED_TEXT,
             wraplength=900,
             justify="left",
             anchor="w",
-        ).grid(row=row, column=1, sticky="w", padx=(PAD, 0), pady=(2, PAD))
-        row += 1
+        ).grid(row=2, column=1, columnspan=2, sticky="w", padx=(PAD, PAD), pady=(2, 2))
 
         # --- Options ----------------------------------------------------
-        # CustomTkinter has no LabelFrame: a heading label above a plain frame
-        # is the equivalent, here and for the log pane below.
-        ctk.CTkLabel(frame, text="Options", anchor="w").grid(
-            row=row, column=0, columnspan=3, sticky="w"
-        )
-        row += 1
-
-        opts = ctk.CTkFrame(frame)
-        opts.grid(row=row, column=0, columnspan=3, sticky="ew", pady=(2, PAD))
+        options = Section(frame, "Options")
+        options.grid(row=1, column=0, sticky="ew", pady=(0, PAD))
+        opts = options.body
         opts.columnconfigure(1, weight=1)
-        row += 1
 
         ctk.CTkLabel(opts, text="Model").grid(
-            row=0, column=0, sticky="w", padx=(PAD, 0), pady=(PAD, 0)
+            row=0, column=0, sticky="w", padx=(PAD, 0), pady=(2, 0)
         )
         self.cmb_model = ctk.CTkComboBox(
             opts,
@@ -313,7 +314,7 @@ class TranscriptorApp:
             state="readonly",
         )
         self.cmb_model.grid(
-            row=0, column=1, columnspan=3, sticky="ew", padx=(PAD, PAD), pady=(PAD, 0)
+            row=0, column=1, columnspan=3, sticky="ew", padx=(PAD, PAD), pady=(2, 0)
         )
 
         ctk.CTkLabel(opts, text="Language").grid(
@@ -336,7 +337,7 @@ class TranscriptorApp:
         )
         self.spn_interval.grid(row=1, column=3, sticky="w", padx=(PAD, 0), pady=(PAD, 0))
         ctk.CTkLabel(opts, text="seconds").grid(
-            row=1, column=4, sticky="w", padx=(4, PAD)
+            row=1, column=4, sticky="w", padx=(4, PAD), pady=(PAD, 0)
         )
 
         ctk.CTkLabel(opts, text="CPU threads").grid(
@@ -353,7 +354,7 @@ class TranscriptorApp:
         )
         self.spn_wrap.grid(row=2, column=3, sticky="w", padx=(PAD, 0), pady=(PAD, 0))
         ctk.CTkLabel(opts, text="chars (0 = off)").grid(
-            row=2, column=4, sticky="w", padx=(4, PAD)
+            row=2, column=4, sticky="w", padx=(4, PAD), pady=(PAD, 0)
         )
 
         self.chk_condition = ctk.CTkCheckBox(
@@ -417,61 +418,71 @@ class TranscriptorApp:
         )
 
         # --- Progress ---------------------------------------------------
+        progress = Section(frame, "Progress")
+        progress.grid(row=2, column=0, sticky="ew", pady=(0, PAD))
+
+        # The status sentence and the percentage sit on the title's row, which
+        # is what pays for the cards' padding: they used to take a row each.
+        # The status column is the one with weight, so in a narrow window it is
+        # the status that clips rather than the percentage — and every status
+        # is in the log as well.
+        progress.header.columnconfigure(1, weight=1)
+        ctk.CTkLabel(progress.header, textvariable=self.var_status, anchor="w").grid(
+            row=0, column=1, sticky="w", padx=(PAD * 2, PAD)
+        )
+        ctk.CTkLabel(progress.header, textvariable=self.var_percent, anchor="e").grid(
+            row=0, column=2, sticky="e"
+        )
+
+        bars = progress.body
+        bars.columnconfigure(0, weight=1)
         self.progress = ctk.CTkProgressBar(
-            frame, orientation="horizontal", mode="determinate",
+            bars, orientation="horizontal", mode="determinate",
             variable=self.var_progress,
         )
-        self.progress.grid(row=row, column=0, columnspan=3, sticky="ew")
-        row += 1
-
-        ctk.CTkLabel(frame, textvariable=self.var_percent, anchor="w").grid(
-            row=row, column=0, columnspan=3, sticky="w", pady=(4, 0)
-        )
-        row += 1
+        self.progress.grid(row=0, column=0, sticky="ew", padx=PAD, pady=(4, PAD))
 
         # The overall bar only earns its space once there is a queue; with one
         # file the two bars would be pixel-identical.
         self.progress_batch = ctk.CTkProgressBar(
-            frame, orientation="horizontal", mode="determinate",
+            bars, orientation="horizontal", mode="determinate",
             variable=self.var_batch_progress,
         )
-        self.progress_batch.grid(row=row, column=0, columnspan=3, sticky="ew", pady=(PAD, 0))
-        row += 1
+        self.progress_batch.grid(row=1, column=0, sticky="ew", padx=PAD, pady=(PAD, 0))
 
         self.lbl_batch = ctk.CTkLabel(
-            frame, textvariable=self.var_batch_percent, anchor="w"
+            bars, textvariable=self.var_batch_percent, anchor="w"
         )
-        self.lbl_batch.grid(row=row, column=0, columnspan=3, sticky="w", pady=(4, 0))
-        row += 1
+        self.lbl_batch.grid(row=2, column=0, sticky="w", padx=PAD, pady=(2, 2))
 
         self.progress_batch.grid_remove()
         self.lbl_batch.grid_remove()
 
-        ctk.CTkLabel(frame, textvariable=self.var_status, anchor="w").grid(
-            row=row, column=0, columnspan=3, sticky="w", pady=(PAD, 4)
-        )
-        row += 1
-
         # --- Log --------------------------------------------------------
-        ctk.CTkLabel(frame, text="Log", anchor="w").grid(
-            row=row, column=0, columnspan=3, sticky="w"
-        )
-        row += 1
+        log = Section(frame, "Log")
+        log.grid(row=3, column=0, sticky="nsew", pady=(0, PAD))
+        frame.rowconfigure(3, weight=1)
+        log.body.columnconfigure(0, weight=1)
+        log.body.rowconfigure(0, weight=1)
 
         self.log = ctk.CTkTextbox(
-            frame,
+            log.body,
             height=110,
             wrap="word",
             state="disabled",
             font=ctk.CTkFont(family=_monospace_family(), size=12),
         )
-        self.log.grid(row=row, column=0, columnspan=3, sticky="nsew", pady=(2, 0))
-        frame.rowconfigure(row, weight=1)
-        row += 1
+        self.log.grid(row=0, column=0, sticky="nsew", padx=PAD, pady=(2, 4))
 
         # --- Buttons ----------------------------------------------------
         buttons = ctk.CTkFrame(frame, fg_color="transparent")
-        buttons.grid(row=row, column=0, columnspan=3, sticky="e", pady=(PAD, 0))
+        buttons.grid(row=4, column=0, sticky="e")
+
+        #: The cards by title, top to bottom.
+        self.sections: dict[str, Section] = {
+            section.title.cget("text"): section
+            for section in (files, options, progress, log)
+        }
 
         self.btn_name_speakers = ctk.CTkButton(
             buttons, text="Name speakers…", command=self._on_name_speakers

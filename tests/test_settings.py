@@ -37,8 +37,11 @@ def test_appearance_round_trips_and_is_clamped(app_dir: Path):
 
 
 def test_ui_scale_round_trips_and_is_clamped(app_dir: Path):
-    settings_mod.save(Settings(ui_scale=130))
-    assert settings_mod.load().ui_scale == 130
+    settings_mod.save(Settings(ui_scale=115))
+    assert settings_mod.load().ui_scale == 115
+
+    settings_mod.save(Settings(ui_scale=130))  # offered until 2.0.0 BETA
+    assert settings_mod.load().ui_scale == 100
 
     settings_mod.save(Settings(ui_scale=400))  # not one of UI_SCALES
     assert settings_mod.load().ui_scale == 100
