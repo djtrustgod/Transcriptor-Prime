@@ -537,7 +537,13 @@ def _identify_speakers(
         turns = absorb_minor_speakers(turns)
 
     found = len({turn.speaker for turn in turns})
-    emit(Status(f"Found {found} speaker{'s' if found != 1 else ''}."))
+    message = f"Found {found} speaker{'s' if found != 1 else ''}"
+    if 0 < found < job.num_speakers:
+        message += (
+            f" ({job.num_speakers} were requested — only {found} distinct "
+            f"voice{'s' if found != 1 else ''} could be told apart)"
+        )
+    emit(Status(message + "."))
     emit(_speaker_progress(1.0, job.duration, started, span))
     return turns
 

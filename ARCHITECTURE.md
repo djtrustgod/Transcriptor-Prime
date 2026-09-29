@@ -244,6 +244,24 @@ it, into the nearest real speaker (auto only — a count the user typed is honou
 the threshold errs toward one speaker too many, because an over-split is fixed in the naming
 window by giving two voices the same name, and two people fused into one cannot be fixed at all.
 
+**A count the user types is reached by merging, never by the engine's forced count.** sherpa-onnx
+can be told "exactly k clusters", and on a 51-minute interview with three people that returned
+*two*: 2848 s and 102 s. Asked for four it returned three. One of the k slots goes to a stray
+embedding (overlap, a laugh) that vanishes when the timeline is rebuilt, and the real voices fuse
+to make room. That is the one error the defaults above exist to avoid. The same file on the
+threshold gave 1462, 545, 509 and 275 s plus scraps: every voice separate, one of them split in
+two. So `diarize_worker` always clusters by threshold, and when a count was given it:
+
+1. embeds each cluster's speech (`cluster_centroids`: turns of 1 s or more, in slices of at most
+   10 s, weighted by length),
+2. folds every scrap (under 3% of the speech) into the voice it sounds most like, so noise can never
+   take one of the places, and
+3. merges the most alike pair until the count is reached (`merge_to_count`).
+
+On that interview the two halves of the host were 0.97 alike, and the merge gave host 846 s and
+guests 1539 s and 566 s. The extra pass costs about 40 s on 51 minutes. If the threshold finds fewer
+voices than were asked for, nothing is invented; the log says so.
+
 Models come from `huggingface_hub.hf_hub_download` — already a dependency via faster-whisper —
 into the same `models` folder, at a **pinned revision**, so a given release of the app always
 fetches the same bytes. It is resumable, atomic and works offline once cached, exactly like the

@@ -1,6 +1,6 @@
 <img src="src/transcriptor_prime/assets/logo.png" alt="" width="88" align="right">
 
-# Transcriptor Prime 2.0.0 BETA
+# Transcriptor Prime 2.0.0 BETA 2
 
 A desktop app that turns audio or video recordings into plain-text transcripts with periodic
 timecodes. Everything runs **locally** — no cloud service, no API key, and nothing about your
@@ -117,7 +117,7 @@ Duration:   00:00:31
 Model:      small (int8, CPU)
 Language:   en (detected, 0.99)
 Generated:  2026-08-02 15:28
-Created by: Transcriptor Prime 2.0.0 BETA
+Created by: Transcriptor Prime 2.0.0 BETA 2
 
 ------------------------------------------------------------
 
@@ -149,7 +149,7 @@ Model:      small (int8, CPU)
 Language:   en (detected, 0.99)
 Speakers:   Interviewer, Jane Doe
 Generated:  2026-09-19 10:30
-Created by: Transcriptor Prime 2.0.0 BETA
+Created by: Transcriptor Prime 2.0.0 BETA 2
 
 ------------------------------------------------------------
 
@@ -189,7 +189,8 @@ beside each and press **Apply names** — the `.txt` is rewritten in place.
 
 - **Set "Speakers" when you know the number** — 2 for a one-on-one interview. Left at `0` the app
   works the number out for itself, which is the part it is most likely to get wrong. Telling it
-  removes that guess. On auto, a "speaker" amounting to only a second or two of sound is folded
+  removes that guess: the voices found are merged, most alike first, down to your number. If the
+  recording holds fewer distinct voices than you set, the log says so. On auto, a "speaker" amounting to only a second or two of sound is folded
   into whoever was talking around it, so a cough does not become a third person.
 - It works best on clear recordings with one person talking at a time. Heavy crosstalk, a very
   short interjection, or two similar voices on one poor microphone will produce some mislabelled
@@ -204,7 +205,8 @@ transcription; the overall bar for a queue waits during the speaker pass. The fi
 the pass reports no percentage — that is normal, not a hang — and **Cancel** works throughout.
 
 Measured on the development machine (8 threads): about **3½ minutes for a 30-minute recording**,
-and about **8 minutes for a 3-hour one** (long recordings are analysed at a coarser step). It
+and about **8 minutes for a 3-hour one** (long recordings are analysed at a coarser step). A set
+**Speakers** count adds a short pass on top, about 40 seconds for 50 minutes. It
 needs memory in proportion to length — roughly **2 GB free for a 3-hour recording**. If a file
 is too much for the machine, that file is transcribed without speaker labels and the log says
 so; nothing is lost.
@@ -339,7 +341,7 @@ pin again from the Start Menu.
 The running version appears in the window title and the first line of the log. Every transcript
 also records it in its `Created by:` header line.
 
-This is **2.0.0 BETA**, which adds speaker identification and the *Name speakers…* window. A
+This is **2.0.0 BETA 2**, the second beta of 2.0.0, which adds speaker identification and the *Name speakers…* window. A
 transcript made without speaker identification is byte-for-byte what 1.0.0 produced. Changes to
 the transcript format or the option set from here will be additive, and anything that is not
 will get a major version. See

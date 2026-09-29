@@ -7,6 +7,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.0.0 BETA 2] - 2026-09-27
+
+The window title, the startup log and every transcript's `Created by:` line read
+`Transcriptor Prime 2.0.0 BETA 2`. (`pyproject.toml` spells it `2.0.0b1`: PEP 440 counts betas
+from 0, and the first beta was `2.0.0b0`.)
+
 ### Changed
 
 - **The window is laid out as four outlined cards — Files, Options, Progress and Log — each with
@@ -19,6 +25,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   at 100% the window is 33 px taller on a 150%-scaled display and the log pane is the same height.
 - The "seconds" and "chars (0 = off)" labels in Options line up with their spin boxes; they sat a
   few pixels high.
+
+### Fixed
+
+- **Setting a speaker count could find one speaker fewer than asked for** — 3 gave 2, with one
+  "speaker" holding 96% of a three-person interview. The engine's own "exactly N speakers" mode
+  gave one of the N places to a stray fragment and fused real people to make room. Speakers are
+  now always found by voice similarity and then merged down to the number you set, scraps first,
+  so noise can no longer take a place. This adds a short extra pass (about 40 s on a 51-minute
+  file) when a count is set. If fewer distinct voices can be found than you asked for, the log
+  now says so instead of just reporting the smaller number.
 
 ### Removed
 

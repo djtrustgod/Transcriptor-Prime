@@ -13,7 +13,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 def test_version_is_semver():
-    assert re.fullmatch(r"\d+\.\d+\.\d+( BETA)?", __version__), __version__
+    assert re.fullmatch(r"\d+\.\d+\.\d+( BETA( [2-9]\d*)?)?", __version__), __version__
 
 
 def test_app_label_combines_name_and_version():
@@ -25,8 +25,13 @@ def test_pyproject_version_matches_the_package():
     data = tomllib.loads(
         (PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8")
     )
-    # pyproject.toml must hold a PEP 440 version, which spells a beta "b0".
-    assert data["project"]["version"] == __version__.replace(" BETA", "b0")
+    # pyproject.toml must hold a PEP 440 version, which counts betas from 0:
+    # "BETA" is b0, "BETA 2" is b1.
+    beta = re.fullmatch(r"(\d+\.\d+\.\d+) BETA(?: (\d+))?", __version__)
+    expected = (
+        f"{beta.group(1)}b{int(beta.group(2) or 1) - 1}" if beta else __version__
+    )
+    assert data["project"]["version"] == expected
 
 
 def test_changelog_documents_the_current_version():

@@ -13,6 +13,7 @@ It talks to its parent in JSON lines on stdout::
     {"phase": "decode"}
     {"phase": "segment"}
     {"progress": [12, 480]}
+    {"phase": "voices"}                                <- only when merging to a count
     {"turns": [[0.31, 8.92, 0], [9.4, 31.0, 1]]}      <- last line on success
     {"error": "…"}                                     <- last line on failure, exit 2
 """
@@ -97,8 +98,10 @@ def build(args):
             num_threads=args.threads,
         ),
         clustering=sherpa_onnx.FastClusteringConfig(
-            # -1 means "work the number out from the threshold".
-            num_clusters=args.num_speakers if args.num_speakers > 0 else -1,
+            # Always by threshold, even when the user gave a count: the engine's
+            # own forced count lets a stray fragment claim one of the slots, and
+            # the real voices fuse to make room (see merge_to_count).
+            num_clusters=-1,
             threshold=args.threshold,
         ),
         min_duration_on=0.3,
@@ -107,6 +110,106 @@ def build(args):
     if not config.validate():
         raise RuntimeError("the speaker models could not be loaded")
     return sherpa_onnx.OfflineSpeakerDiarization(config)
+
+
+def cluster_centroids(samples, turns, embedding_model: str, threads: int) -> dict:
+    """One voice print per cluster: unit embeddings summed, weighted by seconds.
+
+    Turns under a second are skipped (too short to embed reliably); long turns
+    are cut into slices of at most ten seconds, so a long answer counts for
+    what it is worth rather than as a single vote.
+    """
+    import numpy as np
+    import sherpa_onnx
+
+    extractor = sherpa_onnx.SpeakerEmbeddingExtractor(
+        sherpa_onnx.SpeakerEmbeddingExtractorConfig(
+            model=embedding_model, num_threads=threads
+        )
+    )
+    sums: dict[int, np.ndarray] = {}
+    for start, end, speaker in turns:
+        cursor = start
+        while end - cursor >= 1.0:
+            stop = min(end, cursor + 10.0)
+            stream = extractor.create_stream()
+            stream.accept_waveform(
+                SAMPLE_RATE,
+                samples[int(cursor * SAMPLE_RATE) : int(stop * SAMPLE_RATE)],
+            )
+            stream.input_finished()
+            vector = np.asarray(extractor.compute(stream), dtype=np.float64)
+            norm = np.linalg.norm(vector)
+            if norm > 0:
+                weighted = vector / norm * (stop - cursor)
+                sums[speaker] = sums[speaker] + weighted if speaker in sums else weighted
+            cursor = stop
+    return sums
+
+
+def merge_to_count(turns, centroids: dict, count: int, scrap_share: float = 0.03):
+    """Relabel ``turns`` so that at most ``count`` voices remain.
+
+    The engine's clusters (found by threshold) are merged by voice similarity:
+    first each scrap — under ``scrap_share`` of all speech — goes to the most
+    alike substantial voice, so a cough or a burst of overlap can never take
+    one of the ``count`` places; then the most alike pair is merged until
+    ``count`` remain. Fewer clusters than ``count`` are returned as they are:
+    two voices the engine fused cannot be pulled apart here.
+
+    ``turns`` are ``(start, end, cluster)``; ``centroids`` maps cluster to a
+    summed embedding (see :func:`cluster_centroids`). A cluster with no
+    centroid (all its turns under a second) is treated as a scrap.
+    """
+    import numpy as np
+
+    seconds: dict[int, float] = {}
+    for start, end, speaker in turns:
+        seconds[speaker] = seconds.get(speaker, 0.0) + (end - start)
+    if len(seconds) <= count:
+        return [tuple(t) for t in turns]
+
+    owner = {speaker: speaker for speaker in seconds}  # cluster -> surviving group
+    voice = {s: np.asarray(v, dtype=np.float64) for s, v in centroids.items()}
+    size = dict(seconds)
+
+    def similarity(a: int, b: int) -> float:
+        if a not in voice or b not in voice:
+            return -1.0
+        x, y = voice[a], voice[b]
+        return float(x @ y / (np.linalg.norm(x) * np.linalg.norm(y)))
+
+    def merge(into: int, gone: int) -> None:
+        for cluster, group in owner.items():
+            if group == gone:
+                owner[cluster] = into
+        size[into] += size.pop(gone)
+        if gone in voice:
+            voice[into] = voice[into] + voice.pop(gone) if into in voice else voice.pop(gone)
+
+    floor = scrap_share * sum(seconds.values())
+    while True:
+        scraps = [g for g in size if size[g] < floor or g not in voice]
+        substantial = [g for g in size if g not in scraps]
+        if not scraps or len(substantial) < count:
+            break
+        scrap = min(scraps, key=size.get)
+        nearest = max(substantial, key=lambda g: (similarity(g, scrap), size[g]))
+        merge(nearest, scrap)
+
+    while len(size) > count:
+        groups = sorted(size)
+        _, a, b = max(
+            (similarity(a, b), a, b)
+            for i, a in enumerate(groups)
+            for b in groups[i + 1 :]
+        )
+        # The bigger voice keeps its id; it hardly matters which, but it is stable.
+        if size[b] > size[a]:
+            a, b = b, a
+        merge(a, b)
+
+    return [(start, end, owner[speaker]) for start, end, speaker in turns]
 
 
 def selftest(args) -> None:
@@ -162,7 +265,12 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         result = engine.process(samples, callback=on_progress).sort_by_start_time()
-        _say(turns=[[round(t.start, 3), round(t.end, 3), int(t.speaker)] for t in result])
+        turns = [(t.start, t.end, int(t.speaker)) for t in result]
+        if args.num_speakers > 0 and len({t[2] for t in turns}) > args.num_speakers:
+            _say(phase="voices")
+            centroids = cluster_centroids(samples, turns, args.embedding, args.threads)
+            turns = merge_to_count(turns, centroids, args.num_speakers)
+        _say(turns=[[round(s, 3), round(e, 3), int(who)] for s, e, who in turns])
         return 0
     except Exception as exc:
         _say(error=f"{type(exc).__name__}: {exc}")

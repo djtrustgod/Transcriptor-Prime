@@ -846,6 +846,19 @@ class TestSpeakerIdentification:
         text = job.output.read_text("utf-8")
         assert "[00:00:20] Speaker 3:\nSorry?\n" in text
 
+    def test_finding_fewer_voices_than_requested_is_explained(self, tmp_path, install_model, install_diarizer):
+        install_model(INTERVIEW, duration=44.0)
+        install_diarizer(INTERVIEW_TURNS)
+        job = make_job(tmp_path, identify_speakers=True, num_speakers=3)
+
+        events = run(job)
+
+        assert any(
+            isinstance(e, Status)
+            and e.message.startswith("Found 2 speakers (3 were requested")
+            for e in events
+        )
+
     def test_the_queue_bar_holds_still_during_the_speaker_pass(self, tmp_path, install_model, install_diarizer):
         install_model(INTERVIEW, duration=44.0)
         install_diarizer(INTERVIEW_TURNS)
